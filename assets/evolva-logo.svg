@@ -1,27 +1,64 @@
-<svg width="1200" height="360" viewBox="0 0 1200 360" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Evolva logo">
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Evolva logo">
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1200" y2="360"><stop stop-color="#040404"/><stop offset="0.5" stop-color="#0A0804"/><stop offset="1" stop-color="#020202"/></linearGradient>
-    <linearGradient id="gold" x1="250" y1="70" x2="470" y2="290"><stop stop-color="#FFF1BD"/><stop offset="0.35" stop-color="#D7B05D"/><stop offset="0.72" stop-color="#8C6725"/><stop offset="1" stop-color="#E8CC80"/></linearGradient>
-    <linearGradient id="dim" x1="260" y1="90" x2="460" y2="270"><stop stop-color="#B58B3B" stop-opacity="0.25"/><stop offset="1" stop-color="#F2D892" stop-opacity="0.7"/></linearGradient>
-    <linearGradient id="text" x1="535" y1="110" x2="930" y2="240"><stop stop-color="#FFF0B7"/><stop offset="0.45" stop-color="#D0A75B"/><stop offset="1" stop-color="#8E6A2A"/></linearGradient>
-    <radialGradient id="glow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(350 180) rotate(90) scale(150 210)"><stop stop-color="#CDA65A" stop-opacity="0.24"/><stop offset="1" stop-color="#000" stop-opacity="0"/></radialGradient>
-    <filter id="s"><feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#000" flood-opacity="0.75"/><feDropShadow dx="0" dy="0" stdDeviation="7" flood-color="#C8A45D" flood-opacity="0.18"/></filter>
+    <radialGradient id="bg" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(256 256) rotate(90) scale(258)">
+      <stop offset="0" stop-color="#0E0B05"/>
+      <stop offset="0.62" stop-color="#050403"/>
+      <stop offset="1" stop-color="#000000"/>
+    </radialGradient>
+    <linearGradient id="helixA" x1="152" y1="72" x2="360" y2="438" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFF4C8"/>
+      <stop offset="0.26" stop-color="#E7C779"/>
+      <stop offset="0.58" stop-color="#9B732C"/>
+      <stop offset="1" stop-color="#F6E2A3"/>
+    </linearGradient>
+    <linearGradient id="helixB" x1="358" y1="70" x2="154" y2="440" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFEFC0" stop-opacity="0.96"/>
+      <stop offset="0.34" stop-color="#C79A48" stop-opacity="0.82"/>
+      <stop offset="0.68" stop-color="#6F4D1D" stop-opacity="0.54"/>
+      <stop offset="1" stop-color="#EFD18A" stop-opacity="0.9"/>
+    </linearGradient>
+    <filter id="goldGlow" x="52" y="28" width="408" height="456" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="3.2" result="blur"/>
+      <feColorMatrix in="blur" type="matrix" values="1 0 0 0 0.97 0 1 0 0 0.72 0 0 1 0 0.28 0 0 0 0.75 0" result="glow"/>
+      <feMerge>
+        <feMergeNode in="glow"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="softDot" x="0" y="0" width="512" height="512" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="0" stdDeviation="5" flood-color="#F3D58C" flood-opacity="0.95"/>
+      <feDropShadow dx="0" dy="0" stdDeviation="13" flood-color="#B88736" flood-opacity="0.42"/>
+    </filter>
   </defs>
-  <rect width="1200" height="360" rx="34" fill="url(#bg)"/>
-  <rect x="1" y="1" width="1198" height="358" rx="33" stroke="#21180A" stroke-width="2"/>
-  <circle cx="350" cy="180" r="210" fill="url(#glow)"/>
-  <g opacity="0.22" stroke="#8C6C35" stroke-width="1"><path d="M82 288C245 214 401 226 556 263C726 303 892 252 1110 92"/><path d="M90 82C238 144 380 83 535 123C678 160 810 177 1088 64"/></g>
-  <g filter="url(#s)">
-    <path d="M282 82C435 109 435 251 282 278" stroke="url(#gold)" stroke-width="9" stroke-linecap="round"/>
-    <path d="M418 82C265 109 265 251 418 278" stroke="url(#dim)" stroke-width="9" stroke-linecap="round"/>
-    <g stroke="#E7CA83" stroke-opacity="0.88" stroke-width="4" stroke-linecap="round">
-      <path d="M300 111H400"/><path d="M278 149H422"/><path d="M274 188H426"/><path d="M291 226H409"/><path d="M326 263H374"/>
+
+  <rect width="512" height="512" fill="url(#bg)"/>
+  <circle cx="256" cy="255" r="198" fill="#D7AA57" opacity="0.055"/>
+
+  <g filter="url(#goldGlow)" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M154 76C346 104 346 206 256 256C166 306 166 408 358 436" stroke="url(#helixA)" stroke-width="7.5"/>
+    <path d="M358 76C166 104 166 206 256 256C346 306 346 408 154 436" stroke="url(#helixB)" stroke-width="7.5"/>
+
+    <g stroke="#EBD08A" stroke-width="4.6" opacity="0.95">
+      <path d="M171 106H341"/>
+      <path d="M151 166H361"/>
+      <path d="M181 226H331"/>
+      <path d="M181 286H331"/>
+      <path d="M151 346H361"/>
+      <path d="M171 406H341"/>
     </g>
-    <g fill="#F5D98F"><circle cx="282" cy="82" r="5"/><circle cx="418" cy="82" r="5"/><circle cx="282" cy="278" r="5"/><circle cx="418" cy="278" r="5"/></g>
+
+    <g filter="url(#softDot)" fill="#FFF0B8">
+      <circle cx="340" cy="106" r="7.5"/>
+      <circle cx="361" cy="166" r="7.5"/>
+      <circle cx="181" cy="226" r="7.2"/>
+      <circle cx="331" cy="286" r="7.2"/>
+      <circle cx="151" cy="346" r="7.5"/>
+      <circle cx="341" cy="406" r="7.5"/>
+    </g>
   </g>
-  <g filter="url(#s)">
-    <text x="535" y="174" fill="url(#text)" font-family="Inter, Avenir Next, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="84" font-weight="720" letter-spacing="-1.2">Evolva</text>
-    <path d="M540 200H815" stroke="#81622E" stroke-opacity="0.68"/>
-    <text x="542" y="232" fill="#A68A52" font-family="Inter, Avenir Next, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="18" font-weight="500" letter-spacing="7.2">SELF-EVOLVING AGENT SYSTEM</text>
+
+  <g opacity="0.28" stroke="#E5C67D" stroke-width="1.2" stroke-linecap="round">
+    <path d="M112 86C110 137 111 177 142 221"/>
+    <path d="M400 426C402 375 401 335 370 291"/>
   </g>
 </svg>
