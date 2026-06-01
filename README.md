@@ -14,7 +14,7 @@
   <img alt="Agent" src="https://img.shields.io/badge/Agent-Self--Evolving-D6A84F?style=for-the-badge&labelColor=0B0B0F" />
   <img alt="Interface" src="https://img.shields.io/badge/CLI%20%2F%20TUI-Ready-EAD58B?style=for-the-badge&labelColor=0B0B0F" />
   <img alt="MCP" src="https://img.shields.io/badge/MCP-stdio-9F7A30?style=for-the-badge&labelColor=0B0B0F" />
-  <img alt="Tests" src="https://img.shields.io/badge/pytest-49%20passed-2E8B57?style=for-the-badge&labelColor=0B0B0F" />
+  <img alt="Tests" src="https://img.shields.io/badge/pytest-56%20passed-2E8B57?style=for-the-badge&labelColor=0B0B0F" />
 </p>
 
 ---

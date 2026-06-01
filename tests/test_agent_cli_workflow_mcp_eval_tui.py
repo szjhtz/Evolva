@@ -11,7 +11,7 @@ from evolva.agent.core import EvolvaAgent, SYSTEM_PROMPT
 from evolva.agent.mcp import MCPClient, MCPManager, MCPServerConfig, render_mcp_result
 from evolva.agent.multi_agent import MultiAgentCoordinator
 from evolva.agent.tracing import TraceRecorder
-from evolva.cli import build_parser, evolve_cmd, handle_command, main, mcp_cmd, once
+from evolva.cli import build_parser, evolve_cmd, handle_command, main, mcp_cmd, once, optimize_cmd
 from evolva.eval.harness import EvalHarness, EvalResult, render_results
 from evolva.tui import EvolvaTUI, TUIConfirmation
 from evolva.workflow.engine import WorkflowEngine
@@ -207,6 +207,7 @@ def test_cli_parser_main_once_and_handle_commands(monkeypatch, capsys, temp_conf
     assert parser.parse_args(["ask", "hi", "--image", "a.png", "--yes"]).image == ["a.png"]
     assert parser.parse_args(["mcp", "call", "s", "t", "{}", "--yes"]).mcp_cmd == "call"
     assert parser.parse_args(["evolve", "trace", "--apply"]).evolve_cmd == "trace"
+    assert parser.parse_args(["optimize", "--apply"]).apply
 
     monkeypatch.setattr("evolva.cli.AgentConfig", lambda: temp_config)
     assert once(Namespace(message="remember cli", image=None, yes=True, show_tools=False)) == 0
@@ -244,6 +245,12 @@ def test_cli_evolve_cmd_status_trace_eval_and_feedback(monkeypatch, capsys, temp
     assert evolve_cmd(Namespace(evolve_cmd="eval", report=report, apply=True)) == 0
     output = capsys.readouterr().out
     assert "Evolution analysis: eval" in output and "Applied evolution reports" in output
+
+
+def test_cli_optimize_cmd(monkeypatch, capsys, temp_config):
+    monkeypatch.setattr("evolva.cli.AgentConfig", lambda: temp_config)
+    assert optimize_cmd(Namespace(apply=False, fail_on_items=False)) == 0
+    assert "Daily optimization report" in capsys.readouterr().out
 
 
 def test_tui_non_curses_command_completion_queue_and_confirmation(monkeypatch, temp_config):

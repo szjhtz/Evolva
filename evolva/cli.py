@@ -10,6 +10,7 @@ from evolva.agent.core import EvolvaAgent
 from evolva.agent.evolution_analyzer import EvalEvolutionAnalyzer, TraceEvolutionAnalyzer, apply_proposals, render_analysis, render_reports
 from evolva.config import AgentConfig
 from evolva.eval.harness import EvalHarness, render_results
+from evolva.maintenance.optimizer import run_daily_optimization
 from evolva.tui import run_tui
 from evolva.workflow.engine import WorkflowEngine
 
@@ -296,6 +297,16 @@ def evolve_cmd(args: argparse.Namespace) -> int:
     raise SystemExit("unknown evolve command")
 
 
+def optimize_cmd(args: argparse.Namespace) -> int:
+    report, path, rendered = run_daily_optimization(AgentConfig().root, apply=args.apply, write=True)
+    print(rendered)
+    if path:
+        print(f"Report: {path}")
+    if args.fail_on_items and any(item.severity in {"high", "medium"} and not item.fixed for item in report.items):
+        return 1
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="evolva")
     sub = parser.add_subparsers(dest="cmd", required=False)
@@ -348,6 +359,11 @@ def build_parser() -> argparse.ArgumentParser:
     evolve_feedback = evolve_sub.add_parser("feedback", help="Turn direct feedback into a lesson/skill")
     evolve_feedback.add_argument("feedback")
     evolve_feedback.set_defaults(func=evolve_cmd)
+
+    optimize_p = sub.add_parser("optimize", help="Scan project health and list safe optimization opportunities")
+    optimize_p.add_argument("--apply", action="store_true", help="Apply conservative auto-fixes such as stale badge updates and local cache cleanup")
+    optimize_p.add_argument("--fail-on-items", action="store_true", help="Exit non-zero when medium/high unfixed items remain")
+    optimize_p.set_defaults(func=optimize_cmd)
 
     workflow_p = sub.add_parser("workflow", help="Run a JSON workflow spec")
     workflow_p.add_argument("spec", type=lambda s: __import__("pathlib").Path(s))
