@@ -27,7 +27,7 @@ class TraceRun:
 
 
 class TraceRecorder:
-    """JSON trace recorder for observability, replay, and interview demos."""
+    """JSON trace recorder for observability, replay, and diagnostics."""
 
     def __init__(self, traces_dir: Path, *, enabled: bool = True):
         self.traces_dir = traces_dir

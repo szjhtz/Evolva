@@ -4,6 +4,7 @@ import json
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from difflib import SequenceMatcher
 
 
 @dataclass
@@ -31,6 +32,30 @@ class MemoryStore:
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(asdict(item), ensure_ascii=False) + "\n")
         return item
+
+    def find_similar(self, kind: str, content: str, *, threshold: float = 0.92, limit: int = 500) -> MemoryItem | None:
+        """Return a near-duplicate memory item when one already exists."""
+        normalized = self._normalize(content)
+        if not normalized:
+            return None
+        for item in reversed(self.all(limit)):
+            if item.kind != kind:
+                continue
+            other = self._normalize(item.content)
+            if not other:
+                continue
+            if normalized == other:
+                return item
+            if SequenceMatcher(None, normalized, other).ratio() >= threshold:
+                return item
+        return None
+
+    def stats(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for item in self.all(10000):
+            counts[item.kind] = counts.get(item.kind, 0) + 1
+        counts["total"] = sum(counts.values())
+        return counts
 
     def all(self, limit: int = 50) -> list[MemoryItem]:
         if not self.path.exists():
@@ -65,3 +90,6 @@ class MemoryStore:
         if not items:
             return "No relevant memories."
         return "\n".join(f"- [{m.kind}/{m.confidence:.1f}] {m.content}" for m in items)
+
+    def _normalize(self, text: str) -> str:
+        return " ".join(text.lower().strip().split())

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import threading
 from argparse import Namespace
+from dataclasses import replace
 
 import pytest
 
@@ -10,7 +11,7 @@ from evolva.agent.core import EvolvaAgent, SYSTEM_PROMPT
 from evolva.agent.mcp import MCPClient, MCPManager, MCPServerConfig, render_mcp_result
 from evolva.agent.multi_agent import MultiAgentCoordinator
 from evolva.agent.tracing import TraceRecorder
-from evolva.cli import build_parser, handle_command, main, mcp_cmd, once
+from evolva.cli import build_parser, evolve_cmd, handle_command, main, mcp_cmd, once
 from evolva.eval.harness import EvalHarness, EvalResult, render_results
 from evolva.tui import EvolvaTUI, TUIConfirmation
 from evolva.workflow.engine import WorkflowEngine
@@ -39,6 +40,23 @@ def test_agent_call_tool_policy_confirmation_and_unknown(temp_config):
     assert not bad.ok and "Policy denied" in bad.output
     missing = yes._call_tool("missing", {})
     assert not missing.ok and "Tool error" in missing.output
+
+
+def test_agent_auto_evolve_records_report_in_trace_and_context(temp_config):
+    agent = EvolvaAgent(replace(temp_config, max_steps=1), assume_yes=True)
+    agent.llm = type(
+        "FakeLLM",
+        (),
+        {"available": True, "chat": lambda self, messages: type("Resp", (), {"content": json.dumps({"tool": {"name": "missing", "args": {}}, "final": None})})()},
+    )()
+    result = agent.chat("run missing tool")
+
+    assert result.failed_tools == ["missing"]
+    run_id = agent.tracer.list_runs(limit=1)[0]["run_id"]
+    trace = agent.tracer.load(run_id)
+    events = [event for event in trace["events"] if event["kind"] == "auto_evolve"]
+    assert events and events[-1]["data"]["report"]["trigger"] == "tool_failure"
+    assert "tool_failure" in agent.context.render("evolution")
 
 
 def test_agent_messages_include_context_memory_todos_skills_and_images(temp_config):
@@ -188,6 +206,7 @@ def test_cli_parser_main_once_and_handle_commands(monkeypatch, capsys, temp_conf
     assert parser.prog == "evolva"
     assert parser.parse_args(["ask", "hi", "--image", "a.png", "--yes"]).image == ["a.png"]
     assert parser.parse_args(["mcp", "call", "s", "t", "{}", "--yes"]).mcp_cmd == "call"
+    assert parser.parse_args(["evolve", "trace", "--apply"]).evolve_cmd == "trace"
 
     monkeypatch.setattr("evolva.cli.AgentConfig", lambda: temp_config)
     assert once(Namespace(message="remember cli", image=None, yes=True, show_tools=False)) == 0
@@ -196,11 +215,11 @@ def test_cli_parser_main_once_and_handle_commands(monkeypatch, capsys, temp_conf
     assert "已记住" in capsys.readouterr().out
 
     agent = EvolvaAgent(temp_config, assume_yes=True)
-    for line in ["/help", "/tools", "/skills", "/memory", "/context", "/todo", "/todo add task", "/todo done 1", "/agents", "/trace list", "/policy", "/mcp", "/mcp tools", "/evolve feedback", "/workflow", "/run sandbox_info {}", "/unknown"]:
+    for line in ["/help", "/tools", "/skills", "/memory", "/context", "/todo", "/todo add task", "/todo done 1", "/agents", "/trace list", "/policy", "/mcp", "/mcp tools", "/evolve feedback", "/evolve status", "/evolve trace", "/evolve apply-trace", "/evolve eval", "/workflow", "/run sandbox_info {}", "/unknown"]:
         assert handle_command(agent, line) is True
     assert handle_command(agent, "/exit") is False
     output = capsys.readouterr().out
-    assert "Commands:" in output and "Sandbox root" in output and "Unknown command" in output
+    assert "Commands:" in output and "Sandbox root" in output and "Evolution status" in output and "Unknown command" in output
 
 
 def test_cli_mcp_cmd_json_error_and_success(monkeypatch, capsys, temp_config):
@@ -209,6 +228,22 @@ def test_cli_mcp_cmd_json_error_and_success(monkeypatch, capsys, temp_config):
     assert "No MCP servers" in capsys.readouterr().out
     assert mcp_cmd(Namespace(mcp_cmd="call", server="s", tool="t", arguments="{", yes=True)) == 2
     assert "JSON error" in capsys.readouterr().out
+
+
+def test_cli_evolve_cmd_status_trace_eval_and_feedback(monkeypatch, capsys, temp_config, tmp_path):
+    monkeypatch.setattr("evolva.cli.AgentConfig", lambda: temp_config)
+    assert evolve_cmd(Namespace(evolve_cmd="status")) == 0
+    assert "Evolution status" in capsys.readouterr().out
+    assert evolve_cmd(Namespace(evolve_cmd="trace", limit=5, apply=False)) == 0
+    assert "Evolution analysis: trace" in capsys.readouterr().out
+    assert evolve_cmd(Namespace(evolve_cmd="feedback", feedback="Prefer concise verification")) == 0
+    assert "Applied evolution reports" in capsys.readouterr().out
+
+    report = tmp_path / "eval.json"
+    report.write_text(json.dumps({"results": [{"id": "bad", "passed": False, "checks": {"contains:x": False}, "answer": "y", "tool_logs": []}]}))
+    assert evolve_cmd(Namespace(evolve_cmd="eval", report=report, apply=True)) == 0
+    output = capsys.readouterr().out
+    assert "Evolution analysis: eval" in output and "Applied evolution reports" in output
 
 
 def test_tui_non_curses_command_completion_queue_and_confirmation(monkeypatch, temp_config):
@@ -221,6 +256,10 @@ def test_tui_non_curses_command_completion_queue_and_confirmation(monkeypatch, t
     assert any("TUI keys" in m.text for m in app.messages)
     app._handle_command("/todo add tui task")
     assert any("Added todo" in m.text for m in app.messages)
+    app._handle_command("/evolve status")
+    assert any("Evolution status" in m.text for m in app.messages)
+    app._handle_command("/evolve trace")
+    assert any("Evolution analysis: trace" in m.text for m in app.messages)
     app.queue.put(("tool_result", ("sandbox_info", True, "ok")))
     app.queue.put(("system", "system msg"))
     app.queue.put(("error", "bad"))

@@ -7,6 +7,7 @@ import sys
 from typing import Any
 
 from evolva.agent.core import EvolvaAgent
+from evolva.agent.evolution_analyzer import EvalEvolutionAnalyzer, TraceEvolutionAnalyzer, apply_proposals, render_analysis, render_reports
 from evolva.config import AgentConfig
 from evolva.eval.harness import EvalHarness, render_results
 from evolva.tui import run_tui
@@ -32,6 +33,12 @@ Commands:
   /image <path|url> [text]
                        Ask with one image
   /evolve [feedback]   Turn feedback into memory + skill
+  /evolve status       Show evolution status
+  /evolve trace        Analyze traces for evolution proposals
+  /evolve apply-trace  Analyze traces and apply proposals
+  /evolve eval [json]  Analyze eval failures for proposals
+  /evolve apply-eval [json]
+                       Analyze eval failures and apply proposals
   /workflow <json>     Run a workflow spec file
   /run <tool> <json>   Call a tool directly
   /exit                Quit
@@ -116,8 +123,34 @@ def handle_command(agent: EvolvaAgent, line: str) -> bool:
         return True
     if line.startswith("/evolve"):
         feedback = line.removeprefix("/evolve").strip()
+        if feedback in {"status", "stats"}:
+            print(agent.evolution.render_status())
+            return True
+        if feedback in {"trace", "analyze", "analyze-traces"}:
+            print(render_analysis(TraceEvolutionAnalyzer(agent.tracer).analyze()))
+            return True
+        if feedback in {"apply-trace", "apply-traces"}:
+            analysis = TraceEvolutionAnalyzer(agent.tracer).analyze()
+            print(render_analysis(analysis))
+            print(render_reports(apply_proposals(agent.evolution, analysis.proposals)))
+            return True
+        if feedback.startswith("eval") or feedback.startswith("from-eval"):
+            parts = shlex.split(feedback)
+            apply = parts[0] in {"from-eval", "apply-eval"}
+            path = agent.sandbox.resolve(parts[1]) if len(parts) > 1 else None
+            analysis = EvalEvolutionAnalyzer(agent.config.eval_results_dir).analyze_file(path)
+            print(render_analysis(analysis))
+            if apply:
+                print(render_reports(apply_proposals(agent.evolution, analysis.proposals)))
+            return True
         report = agent.evolution.evolve(feedback, task="manual CLI feedback")
-        print(f"已进化：{report.lesson}\n技能：{report.skill_name} ({report.skill_path})")
+        actions = "\n".join(f"- {action}" for action in report.actions)
+        print(
+            f"已进化：{report.summary()}\n"
+            f"置信度：{report.confidence:.2f}，记忆写入：{report.memory_written}\n"
+            f"动作：\n{actions}\n"
+            f"技能：{report.skill_name} ({report.skill_path})"
+        )
         return True
     if line.startswith("/workflow"):
         path = line.removeprefix("/workflow").strip()
@@ -239,6 +272,30 @@ def mcp_cmd(args: argparse.Namespace) -> int:
     raise SystemExit("unknown mcp command")
 
 
+def evolve_cmd(args: argparse.Namespace) -> int:
+    agent = EvolvaAgent(AgentConfig(), assume_yes=True)
+    if args.evolve_cmd == "status":
+        print(agent.evolution.render_status())
+        return 0
+    if args.evolve_cmd == "trace":
+        analysis = TraceEvolutionAnalyzer(agent.tracer).analyze(limit=args.limit)
+        print(render_analysis(analysis))
+        if args.apply:
+            print(render_reports(apply_proposals(agent.evolution, analysis.proposals)))
+        return 0
+    if args.evolve_cmd == "eval":
+        analysis = EvalEvolutionAnalyzer(agent.config.eval_results_dir).analyze_file(args.report)
+        print(render_analysis(analysis))
+        if args.apply:
+            print(render_reports(apply_proposals(agent.evolution, analysis.proposals)))
+        return 0
+    if args.evolve_cmd == "feedback":
+        report = agent.evolution.evolve(args.feedback, task="manual CLI feedback")
+        print(render_reports([report]))
+        return 0
+    raise SystemExit("unknown evolve command")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="evolva")
     sub = parser.add_subparsers(dest="cmd", required=False)
@@ -275,6 +332,22 @@ def build_parser() -> argparse.ArgumentParser:
     eval_p.add_argument("tasks", type=lambda s: __import__("pathlib").Path(s))
     eval_p.add_argument("--yes", action="store_true", help="Approve shell/python tools during eval")
     eval_p.set_defaults(func=eval_cmd)
+
+    evolve_p = sub.add_parser("evolve", help="Inspect or apply self-evolution proposals")
+    evolve_sub = evolve_p.add_subparsers(dest="evolve_cmd", required=True)
+    evolve_status = evolve_sub.add_parser("status", help="Show evolution status")
+    evolve_status.set_defaults(func=evolve_cmd)
+    evolve_trace = evolve_sub.add_parser("trace", help="Analyze traces for evolution proposals")
+    evolve_trace.add_argument("--limit", type=int, default=20)
+    evolve_trace.add_argument("--apply", action="store_true", help="Apply generated proposals as lessons/skills")
+    evolve_trace.set_defaults(func=evolve_cmd)
+    evolve_eval = evolve_sub.add_parser("eval", help="Analyze eval report failures for evolution proposals")
+    evolve_eval.add_argument("report", nargs="?", type=lambda s: __import__("pathlib").Path(s), help="Eval report JSON; defaults to latest")
+    evolve_eval.add_argument("--apply", action="store_true", help="Apply generated proposals as lessons/skills")
+    evolve_eval.set_defaults(func=evolve_cmd)
+    evolve_feedback = evolve_sub.add_parser("feedback", help="Turn direct feedback into a lesson/skill")
+    evolve_feedback.add_argument("feedback")
+    evolve_feedback.set_defaults(func=evolve_cmd)
 
     workflow_p = sub.add_parser("workflow", help="Run a JSON workflow spec")
     workflow_p.add_argument("spec", type=lambda s: __import__("pathlib").Path(s))

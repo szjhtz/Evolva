@@ -123,8 +123,11 @@ class EvolvaAgent:
         self.context.add("message", final, role="assistant")
         self.tracer.event("context_write", {"items": 2})
         if self.config.auto_evolve:
-            self.evolution.reflect_after_turn(user_message, final, failed_tools)
-            self.tracer.event("auto_evolve", {"failed_tools": failed_tools})
+            report = self.evolution.reflect_after_turn(user_message, final, failed_tools)
+            payload = {"failed_tools": failed_tools, "report": report.to_dict() if report else None}
+            self.tracer.event("auto_evolve", payload)
+            if report:
+                self.context.add("decision", report.summary(), role="evolution", meta={"evolution": report.to_dict()})
         self.tracer.end(final, status="completed" if not failed_tools else "completed_with_tool_failures")
         return TurnResult(answer=final, tool_logs=tool_logs, failed_tools=failed_tools)
 

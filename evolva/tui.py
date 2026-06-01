@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from queue import Empty, Queue
 from typing import Any
 
+from evolva.agent.evolution_analyzer import EvalEvolutionAnalyzer, TraceEvolutionAnalyzer, apply_proposals, render_analysis, render_reports
 from evolva.agent.core import EvolvaAgent, TurnResult
 from evolva.config import AgentConfig
 
@@ -25,7 +26,7 @@ TUI keys:
   /exit          Quit
 
 Commands:
-  /help, /tools, /skills, /memory [query], /context [query], /todo, /agents, /trace, /policy, /mcp, /image <path|url> [text], /evolve [feedback], /run <tool> <json>
+  /help, /tools, /skills, /memory [query], /context [query], /todo, /agents, /trace, /policy, /mcp, /image <path|url> [text], /evolve [feedback|status|trace|apply-trace|eval|apply-eval], /run <tool> <json>
 """.strip()
 
 
@@ -292,8 +293,32 @@ class EvolvaTUI:
                     thread.start()
             elif line.startswith("/evolve"):
                 feedback = line.removeprefix("/evolve").strip()
-                report = self.agent.evolution.evolve(feedback, task="manual TUI feedback")
-                self._add_system(f"已进化：{report.lesson}\n技能：{report.skill_name} ({report.skill_path})")
+                if feedback in {"status", "stats"}:
+                    self._add_system(self.agent.evolution.render_status())
+                elif feedback in {"trace", "analyze", "analyze-traces"}:
+                    self._add_system(render_analysis(TraceEvolutionAnalyzer(self.agent.tracer).analyze()))
+                elif feedback in {"apply-trace", "apply-traces"}:
+                    analysis = TraceEvolutionAnalyzer(self.agent.tracer).analyze()
+                    reports = apply_proposals(self.agent.evolution, analysis.proposals)
+                    self._add_system(render_analysis(analysis) + "\n" + render_reports(reports))
+                elif feedback.startswith("eval") or feedback.startswith("from-eval") or feedback.startswith("apply-eval"):
+                    parts = shlex.split(feedback)
+                    apply = bool(parts and parts[0] in {"from-eval", "apply-eval"})
+                    path = self.agent.sandbox.resolve(parts[1]) if len(parts) > 1 else None
+                    analysis = EvalEvolutionAnalyzer(self.agent.config.eval_results_dir).analyze_file(path)
+                    body = render_analysis(analysis)
+                    if apply:
+                        body += "\n" + render_reports(apply_proposals(self.agent.evolution, analysis.proposals))
+                    self._add_system(body)
+                else:
+                    report = self.agent.evolution.evolve(feedback, task="manual TUI feedback")
+                    actions = "\n".join(f"- {action}" for action in report.actions)
+                    self._add_system(
+                        f"已进化：{report.summary()}\n"
+                        f"置信度：{report.confidence:.2f}，记忆写入：{report.memory_written}\n"
+                        f"动作：\n{actions}\n"
+                        f"技能：{report.skill_name} ({report.skill_path})"
+                    )
             elif line.startswith("/run"):
                 self.busy = True
                 self.status = "Running tool..."
