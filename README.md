@@ -1,8 +1,16 @@
+<p align="center">
+  <img src="assets/readme-banner.svg" alt="Evolva banner" width="100%" />
+</p>
+
 # Evolva
 
 一个轻量级本地 Agent Harness：面向 CLI/TUI 对话，内置规划、工具调用、记忆、技能、MCP、工作区执行、反思与自我进化能力。
 
 Evolva 的目标是提供一个可本地运行、依赖极少、便于二次开发的 Agent 工程框架。
+
+<p align="center">
+  <img src="assets/evolva-logo.svg" alt="Evolva logo" width="720" />
+</p>
 
 ## 能力
 
@@ -132,6 +140,26 @@ Workflow 示例：
   ]
 }
 ```
+
+## 视觉概览
+
+### Agent 架构
+
+<p align="center">
+  <img src="assets/architecture.svg" alt="Evolva agent architecture" width="100%" />
+</p>
+
+### TUI Mockup
+
+<p align="center">
+  <img src="assets/tui-mockup.svg" alt="Evolva TUI mockup" width="100%" />
+</p>
+
+### Workflow / MCP / Memory Loop
+
+<p align="center">
+  <img src="assets/workflow-mcp-memory.svg" alt="Evolva workflow MCP memory loop" width="100%" />
+</p>
 
 ## TUI 使用
 

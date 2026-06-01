@@ -1,0 +1,25 @@
+<svg width="1600" height="520" viewBox="0 0 1600 520" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Evolva README banner">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1600" y2="520"><stop stop-color="#030303"/><stop offset="0.55" stop-color="#0A0804"/><stop offset="1" stop-color="#020202"/></linearGradient>
+    <radialGradient id="r" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(420 250) rotate(90) scale(260 390)"><stop stop-color="#CBA45A" stop-opacity="0.22"/><stop offset="1" stop-color="#000" stop-opacity="0"/></radialGradient>
+    <linearGradient id="gold" x1="260" y1="90" x2="540" y2="430"><stop stop-color="#FFF0B9"/><stop offset="0.36" stop-color="#D6AE5F"/><stop offset="0.78" stop-color="#7E5D24"/><stop offset="1" stop-color="#E8CA7D"/></linearGradient>
+    <linearGradient id="text" x1="630" y1="145" x2="1070" y2="300"><stop stop-color="#FFF0BA"/><stop offset="0.48" stop-color="#D0A65B"/><stop offset="1" stop-color="#876426"/></linearGradient>
+    <filter id="shadow"><feDropShadow dx="0" dy="22" stdDeviation="20" flood-color="#000" flood-opacity="0.75"/></filter>
+  </defs>
+  <rect width="1600" height="520" rx="38" fill="url(#bg)"/>
+  <rect x="1" y="1" width="1598" height="518" rx="37" stroke="#21180A" stroke-width="2"/>
+  <circle cx="420" cy="250" r="360" fill="url(#r)"/>
+  <g opacity="0.22" stroke="#8A6A33"><path d="M90 408C305 305 520 324 742 382C960 438 1180 325 1512 124"/><path d="M110 128C322 210 520 100 742 168C948 231 1118 242 1480 92"/></g>
+  <g filter="url(#shadow)">
+    <path d="M310 105C525 143 525 377 310 415" stroke="url(#gold)" stroke-width="12" stroke-linecap="round"/>
+    <path d="M500 105C285 143 285 377 500 415" stroke="#8A6729" stroke-width="12" stroke-linecap="round" stroke-opacity="0.7"/>
+    <g stroke="#E8CB82" stroke-width="5" stroke-linecap="round"><path d="M335 148H475"/><path d="M300 205H510"/><path d="M296 260H514"/><path d="M320 316H490"/><path d="M365 374H445"/></g>
+  </g>
+  <g filter="url(#shadow)">
+    <text x="630" y="236" fill="url(#text)" font-family="Inter, Avenir Next, ui-sans-serif, system-ui, sans-serif" font-size="104" font-weight="730" letter-spacing="-2">Evolva</text>
+    <text x="636" y="292" fill="#A68A52" font-family="Inter, Avenir Next, ui-sans-serif, system-ui, sans-serif" font-size="24" letter-spacing="7">LOCAL SELF-EVOLVING AGENT HARNESS</text>
+    <text x="636" y="348" fill="#D8C18B" font-family="Inter, Avenir Next, ui-sans-serif, system-ui, sans-serif" font-size="27" opacity="0.92">CLI / TUI · Memory · Skills · MCP · Workflow · Eval · Trace · Policy</text>
+  </g>
+  <g opacity="0.5" fill="#CFA95E"><circle cx="1325" cy="174" r="3"/><circle cx="1392" cy="226" r="2.5"/><circle cx="1305" cy="302" r="2.5"/><circle cx="1474" cy="325" r="3"/></g>
+  <path d="M1325 174L1392 226L1305 302L1474 325" stroke="#CFA95E" stroke-opacity="0.3"/>
+</svg>

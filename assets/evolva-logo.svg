@@ -1,0 +1,27 @@
+<svg width="1200" height="360" viewBox="0 0 1200 360" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Evolva logo">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1200" y2="360"><stop stop-color="#040404"/><stop offset="0.5" stop-color="#0A0804"/><stop offset="1" stop-color="#020202"/></linearGradient>
+    <linearGradient id="gold" x1="250" y1="70" x2="470" y2="290"><stop stop-color="#FFF1BD"/><stop offset="0.35" stop-color="#D7B05D"/><stop offset="0.72" stop-color="#8C6725"/><stop offset="1" stop-color="#E8CC80"/></linearGradient>
+    <linearGradient id="dim" x1="260" y1="90" x2="460" y2="270"><stop stop-color="#B58B3B" stop-opacity="0.25"/><stop offset="1" stop-color="#F2D892" stop-opacity="0.7"/></linearGradient>
+    <linearGradient id="text" x1="535" y1="110" x2="930" y2="240"><stop stop-color="#FFF0B7"/><stop offset="0.45" stop-color="#D0A75B"/><stop offset="1" stop-color="#8E6A2A"/></linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(350 180) rotate(90) scale(150 210)"><stop stop-color="#CDA65A" stop-opacity="0.24"/><stop offset="1" stop-color="#000" stop-opacity="0"/></radialGradient>
+    <filter id="s"><feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#000" flood-opacity="0.75"/><feDropShadow dx="0" dy="0" stdDeviation="7" flood-color="#C8A45D" flood-opacity="0.18"/></filter>
+  </defs>
+  <rect width="1200" height="360" rx="34" fill="url(#bg)"/>
+  <rect x="1" y="1" width="1198" height="358" rx="33" stroke="#21180A" stroke-width="2"/>
+  <circle cx="350" cy="180" r="210" fill="url(#glow)"/>
+  <g opacity="0.22" stroke="#8C6C35" stroke-width="1"><path d="M82 288C245 214 401 226 556 263C726 303 892 252 1110 92"/><path d="M90 82C238 144 380 83 535 123C678 160 810 177 1088 64"/></g>
+  <g filter="url(#s)">
+    <path d="M282 82C435 109 435 251 282 278" stroke="url(#gold)" stroke-width="9" stroke-linecap="round"/>
+    <path d="M418 82C265 109 265 251 418 278" stroke="url(#dim)" stroke-width="9" stroke-linecap="round"/>
+    <g stroke="#E7CA83" stroke-opacity="0.88" stroke-width="4" stroke-linecap="round">
+      <path d="M300 111H400"/><path d="M278 149H422"/><path d="M274 188H426"/><path d="M291 226H409"/><path d="M326 263H374"/>
+    </g>
+    <g fill="#F5D98F"><circle cx="282" cy="82" r="5"/><circle cx="418" cy="82" r="5"/><circle cx="282" cy="278" r="5"/><circle cx="418" cy="278" r="5"/></g>
+  </g>
+  <g filter="url(#s)">
+    <text x="535" y="174" fill="url(#text)" font-family="Inter, Avenir Next, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="84" font-weight="720" letter-spacing="-1.2">Evolva</text>
+    <path d="M540 200H815" stroke="#81622E" stroke-opacity="0.68"/>
+    <text x="542" y="232" fill="#A68A52" font-family="Inter, Avenir Next, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="18" font-weight="500" letter-spacing="7.2">SELF-EVOLVING AGENT SYSTEM</text>
+  </g>
+</svg>
