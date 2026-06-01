@@ -1,8 +1,8 @@
 # Evolva
 
-一个仿照 DeerFlow 思路实现的轻量级本地 Agent Harness：面向 CLI 对话，内置规划、工具调用、记忆、技能、工作区执行、反思与自我进化能力。
+一个轻量级本地 Agent Harness：面向 CLI/TUI 对话，内置规划、工具调用、记忆、技能、MCP、工作区执行、反思与自我进化能力。
 
-> 设计参考 DeerFlow 2.0 的核心思想：super-agent harness、sandbox/workspace、memory、tools、skills、sub-agent/task decomposition 与长任务执行。这里实现为一个可本地运行、依赖极少的 Python CLI。
+Evolva 的目标是提供一个可本地运行、依赖极少、便于二次开发的 Agent 工程框架。
 
 ## 能力
 
