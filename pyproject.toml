@@ -6,6 +6,10 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []
 
+[tool.setuptools.packages.find]
+include = ["evolva*"]
+exclude = ["assets*", "evals*", "tests*"]
+
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
 
