@@ -44,7 +44,7 @@
 
 ## Architecture
 
-Evolva 的架构图按数据流重新整理：入口进入 Core，Core 读取/写入状态；执行路径先经过 Policy，再进入 Sandbox 和 Tools；Tools 可扩展到 MCP、Workflow 和 Sub Agents；所有关键事件进入 Trace，再由 Eval 和 Evolution 形成反馈闭环。
+Evolva 的架构图按主路径和反馈路径重新整理：入口进入 Core，Core 读取/写入状态；执行链路固定为 Policy → Sandbox → Tools；Tools 再扩展到 MCP、Sub Agents 和 Workflow；Policy、Sandbox、Tools 的关键事件汇入 Trace，再由 Eval 和 Evolution 形成反馈闭环。
 
 <p align="center">
   <img src="assets/architecture.svg" alt="Evolva clean architecture diagram" width="100%" />
