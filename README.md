@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Local Self-Evolving Agent Harness</strong><br />
-  CLI / TUI · Memory · Skills · MCP · Workflow · Eval · Trace · Policy
+  Plan-Act-Observe loop · Safe local execution · Trace/Eval feedback · Memory/Skill evolution
 </p>
 
 <p align="center">
@@ -19,32 +19,38 @@
 
 ---
 
-**Evolva** 是一个轻量级本地 Agent 工程框架，面向 CLI/TUI 对话场景，内置规划、工具调用、长短期记忆、技能沉淀、MCP 外部工具生态、Workflow 编排、Trace 可观测性、Eval 评测闭环、Guardrails 策略防护与自我进化能力。
+**Evolva** 是一个轻量级本地 Agent Harness：它把 Agent 工程里最关键的执行闭环拆成清晰模块 —— 对话入口、推理循环、状态管理、安全执行、可观测 Trace、可量化 Eval，以及由记忆和技能驱动的自我进化。
 
-它的目标不是只做一个聊天壳，而是提供一个可以拆解、观测、评测、扩展和持续演进的 **Agent Harness**。
+它不是单纯的 chatbot demo，而是一个可以直接阅读、运行、扩展和改造的本地 Agent 工程骨架。
 
-## Highlights
+## Why Evolva
+
+- **完整闭环**：Plan → Act → Observe → Evaluate → Evolve，从工具调用到评测反馈都有落点。
+- **本地优先**：文件、shell、Python、Workflow 都围绕本地 workspace 运行。
+- **安全边界**：Policy 先做风险判断，Sandbox 再做路径和执行隔离，高风险工具需要确认。
+- **可观测**：Trace 记录 prompt、policy、tool call、latency、final answer，方便回放和排障。
+- **可进化**：失败、反馈和 eval 结果会沉淀为长期记忆与 Markdown Skills，反哺后续上下文。
+
+## Capability Map
 
 | Layer | Capability | What it gives you |
 | --- | --- | --- |
-| Interface | CLI / TUI / Ask | 多轮对话、单次提问、终端仪表盘、工具日志侧栏 |
-| Reasoning Loop | Plan → Act → Observe → Reflect | 规划、工具执行、上下文写入、失败反思 |
-| Memory | Long-term memory + context store | facts / preferences / lessons / artifacts / decisions 持久化 |
-| Tools | Files / shell / python / web / todo | 本地工作区执行、代码生成、状态管理、直接工具调用 |
-| Skills | Markdown skill library | 将经验沉淀为可复用 playbook，支持自我进化更新 |
-| MCP | stdio MCP client | 接入外部 MCP server，扩展工具生态 |
-| Workflow | JSON DAG runner | 串联 agent 节点、role 节点、tool 节点，编排长任务 |
-| Eval | JSONL eval harness | 任务集、artifact 检查、文本检查、工具错误 scorer |
-| Observability | Trace list/show/replay | 记录 prompt、policy、tool call、latency、final answer |
-| Safety | Policy engine + sandbox | 路径逃逸检查、危险命令拦截、secret pattern 检测、确认机制 |
+| Interface | CLI / TUI / Ask / Image | 多轮对话、单次提问、终端仪表盘、图片输入 |
+| Core Loop | Plan → Act → Observe → Reflect | 规划、工具执行、上下文写入、失败反思 |
+| State | Memory / Context / Todo / Skills | 长期记忆、运行上下文、任务状态、经验 playbook |
+| Execution | Tools / MCP / Workflow / Sub Agents | 内置工具、外部 MCP 工具、JSON 工作流、多角色协作 |
+| Safety | Policy + Sandbox + Confirmation | 风险分级、路径逃逸检查、危险命令拦截、人工确认 |
+| Feedback | Trace / Eval / Evolution | 可观测日志、回归评测、从失败和反馈中沉淀经验 |
 
-## Visual Overview
+## Architecture
 
-### Agent Architecture
+Evolva 的架构图按数据流重新整理：入口进入 Core，Core 读取/写入状态；执行路径先经过 Policy，再进入 Sandbox 和 Tools；Tools 可扩展到 MCP、Workflow 和 Sub Agents；所有关键事件进入 Trace，再由 Eval 和 Evolution 形成反馈闭环。
 
 <p align="center">
-  <img src="assets/architecture.svg" alt="Evolva agent architecture" width="100%" />
+  <img src="assets/architecture.svg" alt="Evolva clean architecture diagram" width="100%" />
 </p>
+
+## Visual Overview
 
 ### TUI Experience
 
@@ -256,7 +262,7 @@ python3 -m pytest -q
 当前测试覆盖核心状态存储、工具系统、Agent fallback、CLI、TUI 非 curses 逻辑、Workflow、MCP、Eval、LLM wrapper、图片输入与安全策略：
 
 ```text
-49 passed
+56 passed
 ```
 
 ## Project Structure
