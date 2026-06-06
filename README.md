@@ -24,13 +24,13 @@
 Plan -> Act -> Observe -> Evaluate -> Evolve
 ```
 
-它内置 CLI / TUI、工具调用、长期记忆、Skills、MCP、Workflow、Trace、Eval、Guardrails、Sandbox、多 Agent 和自我进化机制，适合作为 Agent Harness 的学习样板和二次开发基础。
+它内置 CLI / TUI、LangGraph 运行时、工具调用、长期记忆、Skills、MCP、Workflow、Trace、Eval、Guardrails、Sandbox、多 Agent 和自我进化机制，适合作为 Agent Harness 的学习样板和二次开发基础。
 
 ## Why Evolva
 
 | Focus | What you get |
 | --- | --- |
-| **Agent Runtime** | 对话入口、上下文组装、工具选择、执行反馈和最终回答 |
+| **Agent Runtime** | 基于 LangGraph 的状态图，对话入口、上下文组装、工具选择、执行反馈和最终回答 |
 | **State & Memory** | facts / preferences / lessons / context / todo 的持久化管理 |
 | **Tooling Layer** | 文件、shell、Python、web、MCP、workflow 和多 Agent 编排 |
 | **Engineering Loop** | trace 观测、eval 回归、policy 防护、失败反思和 skill 沉淀 |
@@ -65,7 +65,7 @@ python3 -m evolva.cli tui
 
 架构按三条主线组织：
 
-1. **Reasoning & State**：CLI / TUI 进入 Evolva Core，Core 统一装配 Memory、Skills、Todo 和 Context。
+1. **Reasoning & State**：CLI / TUI 进入 LangGraph 驱动的 Evolva Core，Core 统一装配 Memory、Skills、Todo 和 Context。
 2. **Guarded Execution**：所有执行能力经过 `Policy -> Sandbox -> Tools`，再扩展到 MCP、Workflow 和 Sub Agents。
 3. **Feedback Loop**：Trace 记录过程，Eval 做回归检查，Evolution 将反馈沉淀为长期记忆和可复用技能。
 
@@ -74,6 +74,7 @@ python3 -m evolva.cli tui
 | Module | Capability |
 | --- | --- |
 | **CLI / TUI / Ask** | 交互式对话、终端 UI、单次提问 |
+| **LangGraph Runtime** | 用 `StateGraph` 编排 prepare / llm / tool / observe / persist / auto_evolve 节点 |
 | **Image Input** | 支持 `--image` 和 `/image`，可接入视觉模型 |
 | **Tools** | 文件、shell、Python、web、todo 等内置工具 |
 | **Memory** | 长期记忆、偏好、经验、上下文持久化 |

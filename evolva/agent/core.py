@@ -8,7 +8,7 @@ from typing import Any
 from evolva.agent.context import ContextStore
 from evolva.agent.evolution import SelfEvolutionEngine
 from evolva.agent.images import user_content_with_images
-from evolva.agent.llm import OpenAICompatibleLLM, extract_json_object
+from evolva.agent.llm import OpenAICompatibleLLM
 from evolva.agent.memory import MemoryStore
 from evolva.agent.mcp import MCPManager
 from evolva.agent.multi_agent import MultiAgentCoordinator
@@ -17,6 +17,7 @@ from evolva.agent.sandbox import Sandbox, SandboxPolicy
 from evolva.agent.skills import SkillStore
 from evolva.agent.todo import TodoStore
 from evolva.agent.tracing import TraceRecorder
+from evolva.agent.langgraph_runtime import EvolvaLangGraphRuntime
 from evolva.config import AgentConfig
 from evolva.tools.base import ToolRegistry, ToolResult
 from evolva.tools.builtin import build_registry
@@ -67,6 +68,7 @@ class EvolvaAgent:
         self.coordinator = MultiAgentCoordinator(self.llm, self.memory, self.skills, self.todos)
         self.tools: ToolRegistry = build_registry(self.sandbox, self.memory, self.skills, self.context, self.todos, self.coordinator, self.policy, self.mcp)
         self.evolution = SelfEvolutionEngine(self.memory, self.skills)
+        self.graph_runtime = EvolvaLangGraphRuntime(self)
         self.assume_yes = assume_yes
         self.confirmer = confirmer
         self.history: list[dict[str, Any]] = []
@@ -74,7 +76,14 @@ class EvolvaAgent:
     def chat(self, user_message: str, image_sources: list[str] | None = None) -> TurnResult:
         self.tracer.start(
             user_message,
-            meta={"model": self.config.model, "llm_available": self.llm.available, "max_steps": self.config.max_steps, "images": image_sources or []},
+            meta={
+                "runtime": "langgraph",
+                "graph_nodes": self.graph_nodes(),
+                "model": self.config.model,
+                "llm_available": self.llm.available,
+                "max_steps": self.config.max_steps,
+                "images": image_sources or [],
+            },
         )
         if not self.llm.available:
             if image_sources:
@@ -85,51 +94,15 @@ class EvolvaAgent:
             self.tracer.end(result.answer, status="fallback")
             return result
 
-        tool_logs: list[str] = []
-        failed_tools: list[str] = []
-        scratch = ""
-        final = ""
-        for _ in range(self.config.max_steps):
-            messages = self._messages(user_message, scratch, image_sources=image_sources)
-            self.tracer.event("prompt", {"message_count": len(messages), "scratch_chars": len(scratch), "system_chars": len(messages[0]["content"])})
-            raw = self.llm.chat(messages).content
-            self.tracer.event("llm_response", {"raw": raw[:4000]})
-            action = extract_json_object(raw)
-            if not action:
-                final = raw.strip()
-                break
-            if action.get("final"):
-                final = str(action["final"])
-                break
-            tool = action.get("tool")
-            if not tool:
-                final = str(action.get("thought", "Done."))
-                break
-            name = tool.get("name")
-            args = tool.get("args") or {}
-            result = self._call_tool(name, args)
-            log = f"TOOL {name}({json.dumps(args, ensure_ascii=False)}) -> ok={result.ok}\n{result.output}"
-            tool_logs.append(log)
-            if not result.ok:
-                failed_tools.append(name)
-            scratch += "\n" + log[:4000]
-        else:
-            final = "达到最大执行步数，已停止。已完成的工具结果如下：\n" + "\n".join(tool_logs[-3:])
-
-        history_user = user_message if not image_sources else f"{user_message}\n[Images: {', '.join(image_sources)}]"
-        self.history.append({"role": "user", "content": history_user})
-        self.history.append({"role": "assistant", "content": final})
-        self.context.add("message", history_user, role="user")
-        self.context.add("message", final, role="assistant")
-        self.tracer.event("context_write", {"items": 2})
-        if self.config.auto_evolve:
-            report = self.evolution.reflect_after_turn(user_message, final, failed_tools)
-            payload = {"failed_tools": failed_tools, "report": report.to_dict() if report else None}
-            self.tracer.event("auto_evolve", payload)
-            if report:
-                self.context.add("decision", report.summary(), role="evolution", meta={"evolution": report.to_dict()})
+        state = self.graph_runtime.run(user_message, image_sources=image_sources)
+        final = state.get("final", "")
+        failed_tools = state.get("failed_tools", [])
         self.tracer.end(final, status="completed" if not failed_tools else "completed_with_tool_failures")
-        return TurnResult(answer=final, tool_logs=tool_logs, failed_tools=failed_tools)
+        return TurnResult(answer=final, tool_logs=state.get("tool_logs", []), failed_tools=failed_tools)
+
+    def graph_nodes(self) -> list[str]:
+        """Return the explicit LangGraph node names used by the runtime."""
+        return ["prepare", "llm", "tool", "observe", "persist", "auto_evolve"]
 
     def _messages(self, user_message: str, scratch: str, image_sources: list[str] | None = None) -> list[dict[str, Any]]:
         context = (

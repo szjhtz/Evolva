@@ -42,6 +42,33 @@ def test_agent_call_tool_policy_confirmation_and_unknown(temp_config):
     assert not missing.ok and "Tool error" in missing.output
 
 
+def test_agent_uses_langgraph_runtime_for_llm_tool_loop(temp_config):
+    agent = EvolvaAgent(temp_config, assume_yes=True)
+    responses = iter([
+        {"thought": "write file", "tool": {"name": "write_file", "args": {"path": "evolva/workspace/langgraph.txt", "content": "ok"}}, "final": None},
+        {"thought": "done", "tool": None, "final": "LangGraph completed"},
+    ])
+
+    class FakeLLM:
+        available = True
+
+        def chat(self, messages):
+            return type("Resp", (), {"content": json.dumps(next(responses))})()
+
+    agent.llm = FakeLLM()
+    result = agent.chat("create langgraph file")
+
+    assert result.answer == "LangGraph completed"
+    assert not result.failed_tools
+    assert any("TOOL write_file" in log for log in result.tool_logs)
+    assert (temp_config.workspace / "langgraph.txt").read_text() == "ok"
+    run_id = agent.tracer.list_runs(limit=1)[0]["run_id"]
+    trace = agent.tracer.load(run_id)
+    meta_events = [event for event in trace["events"] if event["kind"] == "run_meta"]
+    assert meta_events[-1]["data"]["runtime"] == "langgraph"
+    assert meta_events[-1]["data"]["graph_nodes"] == agent.graph_nodes()
+    assert {event["data"].get("node") for event in trace["events"] if event["kind"] == "langgraph_node"} >= {"prepare", "llm", "tool", "observe", "persist", "auto_evolve"}
+
 def test_agent_auto_evolve_records_report_in_trace_and_context(temp_config):
     agent = EvolvaAgent(replace(temp_config, max_steps=1), assume_yes=True)
     agent.llm = type(
