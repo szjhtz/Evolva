@@ -1,0 +1,101 @@
+<svg width="1280" height="640" viewBox="0 0 1280 640" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">Evolva Agent Harness hero</title>
+  <desc id="desc">A black and gold vector hero banner for Evolva with a DNA logo, capability cards, and terminal command.</desc>
+  <defs>
+    <radialGradient id="bgGlow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(966 56) rotate(133) scale(938 800)">
+      <stop stop-color="#33260F"/>
+      <stop offset="0.42" stop-color="#0E0D0A"/>
+      <stop offset="1" stop-color="#050506"/>
+    </radialGradient>
+    <linearGradient id="gold" x1="120" y1="0" x2="1120" y2="640" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFF4C7"/>
+      <stop offset="0.36" stop-color="#D7A93E"/>
+      <stop offset="0.72" stop-color="#8A5E16"/>
+      <stop offset="1" stop-color="#F8D978"/>
+    </linearGradient>
+    <linearGradient id="softGold" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#F9E9B7"/>
+      <stop offset="1" stop-color="#A97518"/>
+    </linearGradient>
+    <linearGradient id="green" x1="0" y1="0" x2="1" y2="0">
+      <stop stop-color="#4DFFB1"/>
+      <stop offset="1" stop-color="#1ECF83"/>
+    </linearGradient>
+    <filter id="shadow" x="0" y="0" width="1280" height="640" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="24" stdDeviation="26" flood-color="#000" flood-opacity="0.42"/>
+    </filter>
+    <filter id="goldGlow" x="-40" y="-40" width="180" height="220" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="0" stdDeviation="5" flood-color="#D7A93E" flood-opacity="0.35"/>
+    </filter>
+    <style>
+      .title{font: 400 96px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing:-3px; fill:#FFF4D6}
+      .subtitle{font: 500 34px Inter, ui-sans-serif, system-ui, sans-serif; fill:#D7A93E}
+      .muted{font: 400 22px Inter, ui-sans-serif, system-ui, sans-serif; fill:#AFA283}
+      .headline{font: 400 54px Inter, ui-sans-serif, system-ui, sans-serif; fill:#F8F4EA; letter-spacing:-1px}
+      .headline2{font: 500 30px Inter, ui-sans-serif, system-ui, sans-serif; fill:#D7A93E}
+      .cardTitle{font: 500 27px Inter, ui-sans-serif, system-ui, sans-serif; fill:#FFF4D6}
+      .cardText{font: 400 18px Inter, ui-sans-serif, system-ui, sans-serif; fill:#AFA283}
+      .terminal{font: 500 24px "SFMono-Regular", Consolas, "Liberation Mono", monospace; fill:#55F3A8}
+      .repo{font: 500 24px Inter, ui-sans-serif, system-ui, sans-serif; fill:#FFF4D6}
+      .star{font: 500 24px Inter, ui-sans-serif, system-ui, sans-serif; fill:#F2C85B}
+      .micro{font: 400 18px Inter, ui-sans-serif, system-ui, sans-serif; fill:#8F805F; letter-spacing:2px}
+    </style>
+  </defs>
+
+  <rect width="1280" height="640" fill="url(#bgGlow)"/>
+  <path d="M-80 224C96 54 327 42 640 42C956 42 1137 25 1390 -60" stroke="#8A5E16" stroke-opacity="0.24"/>
+  <path d="M-52 292C172 90 408 88 697 82C1000 76 1155 48 1376 -36" stroke="#D7A93E" stroke-opacity="0.12"/>
+  <path d="M-90 340C130 142 420 124 698 122C990 120 1156 88 1352 10" stroke="#8A5E16" stroke-opacity="0.14"/>
+
+  <g filter="url(#shadow)">
+    <rect x="64" y="62" width="1152" height="516" rx="42" fill="#080808" fill-opacity="0.92" stroke="url(#gold)" stroke-width="1.2"/>
+    <rect x="84" y="80" width="1112" height="478" rx="34" stroke="#7A5317" stroke-opacity="0.56"/>
+  </g>
+
+  <g transform="translate(128 104)" filter="url(#goldGlow)">
+    <path d="M58 0C18 20 17 45 58 68C99 91 99 116 58 138" stroke="#FFF2C7" stroke-width="7" stroke-linecap="round"/>
+    <path d="M58 0C98 20 99 45 58 68C17 91 17 116 58 138" stroke="#D4A232" stroke-width="7" stroke-linecap="round"/>
+    <path d="M32 24H84M25 52H91M25 86H91M32 114H84" stroke="#F7D979" stroke-width="4" stroke-linecap="round" opacity="0.9"/>
+    <circle cx="58" cy="0" r="4" fill="#FFF2C7"/><circle cx="58" cy="138" r="4" fill="#FFF2C7"/>
+  </g>
+
+  <text x="272" y="160" class="title">Evolva</text>
+  <text x="276" y="214" class="subtitle">Agent Harness for builders</text>
+  <text x="276" y="252" class="muted">A compact local framework for learning, extending, and shipping agent systems.</text>
+
+  <rect x="132" y="304" width="1016" height="112" rx="24" fill="#11100D" stroke="#6E4812" stroke-opacity="0.72"/>
+  <text x="174" y="366" class="headline">Not just a chatbot demo.</text>
+  <text x="174" y="402" class="headline2">A small but complete agent engineering harness.</text>
+
+  <g transform="translate(132 452)">
+    <g>
+      <rect width="232" height="68" rx="18" fill="#090909" stroke="#7A5317" stroke-opacity="0.68"/>
+      <text x="28" y="31" class="cardTitle">LangGraph</text>
+      <text x="28" y="55" class="cardText">state graph runtime</text>
+    </g>
+    <g transform="translate(260 0)">
+      <rect width="232" height="68" rx="18" fill="#090909" stroke="#7A5317" stroke-opacity="0.68"/>
+      <text x="28" y="31" class="cardTitle">Memory</text>
+      <text x="28" y="55" class="cardText">long-term context</text>
+    </g>
+    <g transform="translate(520 0)">
+      <rect width="232" height="68" rx="18" fill="#090909" stroke="#7A5317" stroke-opacity="0.68"/>
+      <text x="28" y="31" class="cardTitle">MCP</text>
+      <text x="28" y="55" class="cardText">external tool ecosystem</text>
+    </g>
+    <g transform="translate(780 0)">
+      <rect width="236" height="68" rx="18" fill="#090909" stroke="#7A5317" stroke-opacity="0.68"/>
+      <text x="28" y="31" class="cardTitle">Trace / Eval</text>
+      <text x="28" y="55" class="cardText">observe, replay, score</text>
+    </g>
+  </g>
+
+  <g transform="translate(132 536)">
+    <rect width="1016" height="72" rx="20" fill="#030303" stroke="#B9851F"/>
+    <text x="34" y="45" class="terminal">$ python3 -m evolva.cli tui</text>
+    <text x="520" y="45" class="repo">GitHub: koppx/Evolva</text>
+    <text x="850" y="45" class="star">Star welcome</text>
+  </g>
+
+  <text x="422" y="624" class="micro">TOOLS · WORKFLOW · MEMORY · SANDBOX · SELF-EVOLUTION</text>
+</svg>

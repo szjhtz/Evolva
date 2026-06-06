@@ -1,103 +1,139 @@
 <p align="center">
-  <img src="assets/readme-banner.svg" alt="Evolva banner" width="100%" />
+  <img src="assets/evolva-hero.svg" alt="Evolva - Local Self-Evolving Agent Harness" width="100%" />
 </p>
 
 <h1 align="center">Evolva</h1>
 
 <p align="center">
-  <strong>Local Self-Evolving Agent Harness</strong><br />
-  Build agents that remember, execute, inspect, evaluate, and evolve.
+  <strong>本地优先的 Self-Evolving Agent Harness</strong><br />
+  用一个小而完整的项目，拆开 Agent 工程里的运行时、工具、记忆、评测、观测、安全与进化闭环。
+</p>
+
+<p align="center">
+  <a href="README.en.md">English</a> · <a href="#快速开始">快速开始</a> · <a href="#能力地图">能力地图</a> · <a href="#自我进化">自我进化</a>
 </p>
 
 <p align="center">
   <img alt="Python" src="https://img.shields.io/badge/Python-3.10%2B-FFF0B3?style=for-the-badge&labelColor=0B0B0F" />
-  <img alt="Agent" src="https://img.shields.io/badge/Agent-Harness-D6A84F?style=for-the-badge&labelColor=0B0B0F" />
-  <img alt="TUI" src="https://img.shields.io/badge/TUI-Ready-EAD58B?style=for-the-badge&labelColor=0B0B0F" />
+  <img alt="LangGraph" src="https://img.shields.io/badge/LangGraph-Runtime-D6A84F?style=for-the-badge&labelColor=0B0B0F" />
+  <img alt="CLI/TUI" src="https://img.shields.io/badge/CLI%20%2F%20TUI-Ready-EAD58B?style=for-the-badge&labelColor=0B0B0F" />
   <img alt="MCP" src="https://img.shields.io/badge/MCP-stdio-9F7A30?style=for-the-badge&labelColor=0B0B0F" />
+  <img alt="Local First" src="https://img.shields.io/badge/Local--First-Agent%20Harness-2E8B57?style=for-the-badge&labelColor=0B0B0F" />
 </p>
 
 ---
 
-**Evolva** 是一个面向本地开发和 Agent 工程学习的 Agent Harness。它不只是一个 chatbot，而是把一个可落地 Agent 需要的执行链路拆成清晰模块：
+## 为什么是 Evolva
+
+很多 Agent 示例停留在 chatbot demo：能对话，但看不清工程上如何组织上下文、如何接工具、如何做 Trace / Eval、如何加安全边界，更看不到失败后如何沉淀经验。
+
+**Evolva** 把这些能力压缩到一个可读、可跑、可测试的本地项目里：
 
 ```text
 Plan -> Act -> Observe -> Evaluate -> Evolve
 ```
 
-它内置 CLI / TUI、LangGraph 运行时、工具调用、长期记忆、Skills、MCP、Workflow、Trace、Eval、Guardrails、Sandbox、多 Agent 和自我进化机制，适合作为 Agent Harness 的学习样板和二次开发基础。
+你可以把它当成一个 Agent Harness 学习样板，也可以直接在它之上扩展自己的本地 Agent 框架。
 
-## Why Evolva
-
-| Focus | What you get |
-| --- | --- |
-| **Agent Runtime** | 基于 LangGraph 的状态图，对话入口、上下文组装、工具选择、执行反馈和最终回答 |
-| **State & Memory** | facts / preferences / lessons / context / todo 的持久化管理 |
-| **Tooling Layer** | 文件、shell、Python、web、MCP、workflow 和多 Agent 编排 |
-| **Engineering Loop** | trace 观测、eval 回归、policy 防护、失败反思和 skill 沉淀 |
-
-## Quick Start
+## 快速开始
 
 ```bash
 git clone git@github.com:koppx/Evolva.git
 cd Evolva
 python3 -m pip install -e ".[dev]"
 
-# Optional: any OpenAI-compatible endpoint
+# 可选：任意 OpenAI-compatible endpoint
 export OPENAI_API_KEY="..."
 export OPENAI_MODEL="gpt-4o-mini"
 
 python3 -m evolva.cli chat
 ```
 
-启动 TUI：
+更多入口：
 
 ```bash
+# 终端 UI
 python3 -m evolva.cli tui
+
+# 单次提问
+python3 -m evolva.cli ask "记住：写完 Python 后运行测试"
+
+# 图片输入
+python3 -m evolva.cli ask "描述这张图" --image evolva/workspace/example.png
 ```
 
-未配置 `OPENAI_API_KEY` 时，Evolva 会进入有限规则模式，仍可使用本地命令、记忆、技能、todo、trace、workflow 和工具调用。
+未配置 `OPENAI_API_KEY` 时，Evolva 会进入有限规则模式；本地工具、记忆、技能、Todo、Trace、Workflow、Eval 等能力仍可使用。
 
-## Architecture
+## 能力地图
+
+| 能力 | 说明 | 入口 |
+| --- | --- | --- |
+| **LangGraph Runtime** | 显式 `StateGraph` 节点：`prepare -> llm -> tool -> observe -> persist -> auto_evolve` | `evolva/agent/langgraph_runtime.py` |
+| **CLI / TUI** | 交互对话、单次 ask、curses TUI | `python3 -m evolva.cli chat` / `tui` |
+| **Tools** | 文件、Shell、Python、Web、Todo、Memory、Context、Policy、MCP、多 Agent 委派 | `/tools` / `/run` |
+| **Memory / Skills** | 长期记忆、偏好、经验教训、Markdown playbook | `/memory` / `/skills` |
+| **MCP** | stdio MCP client，连接外部工具服务 | `python3 -m evolva.cli mcp ...` |
+| **Workflow** | JSON 工作流编排 role agent、agent call、tool node | `python3 -m evolva.cli workflow ...` |
+| **Trace / Replay** | 记录 prompt、工具调用、policy 决策、耗时、错误与输出 | `python3 -m evolva.cli trace ...` |
+| **Eval Harness** | JSONL 任务集，覆盖文本、正则、产物、记忆、上下文和工具错误 | `python3 -m evolva.cli eval ...` |
+| **Guardrails / Sandbox** | 路径沙箱、危险命令拦截、风险分级、secret 检测、确认门禁 | `/policy` |
+| **Self-Evolution** | 从反馈、Trace、Eval 失败中提炼 lesson，并写入 Memory / Skill | `python3 -m evolva.cli evolve ...` |
+
+## 架构
 
 <p align="center">
-  <img src="assets/architecture.svg" alt="Evolva agent architecture" width="100%" />
+  <img src="assets/architecture.svg" alt="Evolva architecture" width="100%" />
 </p>
 
-架构按三条主线组织：
+Evolva 的结构可以按三条线理解：
 
-1. **Reasoning & State**：CLI / TUI 进入 LangGraph 驱动的 Evolva Core，Core 统一装配 Memory、Skills、Todo 和 Context。
-2. **Guarded Execution**：所有执行能力经过 `Policy -> Sandbox -> Tools`，再扩展到 MCP、Workflow 和 Sub Agents。
-3. **Feedback Loop**：Trace 记录过程，Eval 做回归检查，Evolution 将反馈沉淀为长期记忆和可复用技能。
+1. **Reasoning & State**：CLI / TUI 进入 Evolva Core，由 LangGraph runtime 组织推理状态，并装配 Memory、Skills、Todo、Context。
+2. **Guarded Execution**：工具调用先经过 Policy 和 Sandbox，再访问文件、Shell、Python、Web、MCP、Workflow 与 Sub Agents。
+3. **Feedback Loop**：Trace 记录行为，Eval 检查回归，Evolution 将反馈和失败沉淀为长期记忆与技能。
 
-## Capabilities
+## 自我进化
 
-| Module | Capability |
-| --- | --- |
-| **CLI / TUI / Ask** | 交互式对话、终端 UI、单次提问 |
-| **LangGraph Runtime** | 用 `StateGraph` 编排 prepare / llm / tool / observe / persist / auto_evolve 节点 |
-| **Image Input** | 支持 `--image` 和 `/image`，可接入视觉模型 |
-| **Tools** | 文件、shell、Python、web、todo 等内置工具 |
-| **Memory** | 长期记忆、偏好、经验、上下文持久化 |
-| **Skills** | Markdown playbook，沉淀可复用执行经验 |
-| **MCP** | stdio MCP client，接入外部工具生态 |
-| **Workflow** | JSON 工作流，组合 agent / role / tool 节点 |
-| **Trace** | 记录 prompt、policy、tool call、latency、final answer |
-| **Eval** | JSONL 任务集，支持文本、正则、artifact、memory、context 等检查 |
-| **Guardrails** | Policy、Sandbox、危险命令拦截、secret pattern 检测、确认机制 |
-| **Self-Evolution** | 从反馈、失败、trace、eval 中提炼 lesson，并更新 Memory / Skills |
+Evolva 的自我进化不是一句宣传语，而是可检查的状态更新链路：
 
-## Daily Usage
+```text
+Feedback / Trace Pattern / Eval Failure
+        ↓
+Reflection
+        ↓
+Long-term Memory
+        ↓
+Markdown Skill
+        ↓
+Future Prompt Context
+```
+
+示例：
 
 ```bash
-# Chat / TUI / one-shot ask
+python3 -m evolva.cli evolve feedback "以后写 Python 文件后自动运行语法检查和 pytest"
+python3 -m evolva.cli evolve trace --apply
+python3 -m evolva.cli evolve eval --apply
+```
+
+它会把反馈或失败模式提炼成 lesson，写入长期记忆，并可生成 Markdown Skill，让后续任务自动带上这些经验。
+
+## 常用命令
+
+```bash
+# Chat / TUI / Ask
 python3 -m evolva.cli chat
 python3 -m evolva.cli tui
-python3 -m evolva.cli ask "记住：写完 Python 后运行测试"
-python3 -m evolva.cli ask "请描述这张图" --image evolva/workspace/example.png
+python3 -m evolva.cli ask "规划一个本地 Agent demo"
 
-# Trace / Eval / Workflow
+# Trace
 python3 -m evolva.cli trace list
+python3 -m evolva.cli trace show <run_id>
+python3 -m evolva.cli trace replay <run_id>
+
+# Eval
 python3 -m evolva.cli eval evals/tasks/smoke.jsonl --yes
+
+# Workflow
 python3 -m evolva.cli workflow path/to/workflow.json --yes
 
 # MCP
@@ -108,11 +144,11 @@ python3 -m evolva.cli mcp call filesystem list_directory '{"path":"."}' --yes
 # Self-evolution
 python3 -m evolva.cli evolve status
 python3 -m evolva.cli evolve trace --apply
-python3 -m evolva.cli evolve eval
+python3 -m evolva.cli evolve eval --apply
 ```
 
 <details>
-<summary><strong>Interactive slash commands</strong></summary>
+<summary><strong>交互式 Slash Commands</strong></summary>
 
 ```text
 /help                     查看帮助
@@ -140,31 +176,7 @@ python3 -m evolva.cli evolve eval
 
 </details>
 
-## Self-Evolution
-
-Evolva 的自我进化不是一句口号，而是由可检查的状态变化组成：
-
-```text
-Feedback / Failure / Eval Result
-        ↓
-Reflection
-        ↓
-Long-term Memory
-        ↓
-Markdown Skill
-        ↓
-Future Prompt Context
-```
-
-你可以在对话中直接反馈：
-
-```text
-/evolve 以后写 Python 文件后自动运行语法检查和 pytest
-```
-
-Evolva 会将反馈提炼为 lesson，并在后续任务中通过 Memory / Skills 重新注入上下文。
-
-## Workflow Example
+## Workflow 示例
 
 ```json
 {
@@ -177,68 +189,64 @@ Evolva 会将反馈提炼为 lesson，并在后续任务中通过 Memory / Skill
 }
 ```
 
-## Eval Example
+## Eval 示例
 
 ```json
-{
-  "id": "tool_write_read_001",
-  "input": "创建 hello.py 并运行",
-  "expected_artifacts": ["evolva/workspace/hello.py"],
-  "expected_contains": ["hello"],
-  "scorers": ["no_tool_error"]
-}
+{"id":"tool_write_read_001","input":"创建 hello.py 并运行","expected_artifacts":["evolva/workspace/hello.py"],"expected_contains":["hello"],"scorers":["no_tool_error"]}
 ```
 
-支持的检查项包括：`expected_contains`、`forbidden_contains`、`expected_regex`、`expected_artifacts`、`expected_memory`、`expected_context`、`max_duration_ms`、`no_tool_error`。
+支持 `expected_contains`、`forbidden_contains`、`expected_regex`、`expected_artifacts`、`expected_memory`、`expected_context`、`max_duration_ms`、`no_tool_error` 等检查项。
 
-## TUI Preview
+## TUI 预览
 
 <p align="center">
   <img src="assets/tui-mockup.svg" alt="Evolva TUI mockup" width="100%" />
 </p>
 
-## Safety Model
+## Workflow / MCP / Memory
 
-Evolva 是本地 Agent，具备文件、shell 和 Python 执行能力，因此默认提供多层安全边界：
+<p align="center">
+  <img src="assets/workflow-mcp-memory.svg" alt="Evolva workflow MCP memory" width="100%" />
+</p>
 
-- **Sandbox root**：文件工具统一通过 sandbox 解析路径，阻止路径逃逸。
+## 安全模型
+
+Evolva 是本地优先的 Agent，具备文件、Shell 和 Python 执行能力，因此默认提供多层安全边界：
+
+- **Sandbox root**：文件工具统一通过 workspace sandbox 解析路径，阻止路径逃逸。
 - **Dangerous command denylist**：拦截 `rm -rf /`、`git reset --hard`、`mkfs`、`shutdown` 等高危片段。
-- **Policy engine**：对 shell / Python、网络、路径、secret pattern 进行风险分级。
-- **Confirmation gate**：非 `--yes` 模式下，shell / Python / MCP 等高风险工具需要确认。
-- **Trace audit**：关键决策、工具调用和失败信息都会进入 trace，便于审计和复盘。
+- **Policy engine**：对 Shell / Python、网络、路径、secret pattern 进行风险分级。
+- **Confirmation gate**：非 `--yes` 模式下，Shell / Python / MCP 等高风险工具需要确认。
+- **Trace audit**：关键决策、工具调用、失败信息和最终回答都会进入 trace，便于审计和复盘。
 
-## Development
+## 开发与测试
 
 ```bash
 PYTHONPYCACHEPREFIX=.pycache python3 -m compileall evolva tests
 python3 -m pytest -q
 ```
 
-## Project Structure
+## 项目结构
 
 ```text
 evolva/
-  cli.py                CLI / command entry
-  tui.py                curses terminal UI
-  agent/core.py         plan-act-observe-reflect loop
-  agent/context.py      persistent context store
-  agent/evolution.py    lesson + skill evolution engine
-  agent/images.py       local/URL image input helpers
-  agent/llm.py          OpenAI-compatible client
-  agent/mcp.py          stdio MCP client
-  agent/memory.py       long-term memory store
-  agent/multi_agent.py  planner/researcher/coder/reviewer roles
-  agent/policy.py       guardrails and risk decisions
-  agent/sandbox.py      workspace sandbox and execution
-  agent/skills.py       markdown skill library
-  agent/todo.py         persistent todo list
-  agent/tracing.py      trace record/show/replay
-  tools/builtin.py      builtin tool registry
-  eval/harness.py       JSONL eval runner
-  workflow/engine.py    workflow DAG engine
+  cli.py                     CLI 入口
+  tui.py                     curses 终端 UI
+  agent/core.py              Agent 对外门面
+  agent/langgraph_runtime.py LangGraph StateGraph 运行时
+  agent/evolution.py         lesson + skill 自进化引擎
+  agent/evolution_analyzer.py Trace / Eval 进化分析器
+  agent/images.py            本地/URL 图片输入
+  agent/mcp.py               stdio MCP client
+  agent/memory.py            长期记忆
+  agent/policy.py            guardrails 与风险决策
+  agent/sandbox.py           workspace sandbox 与执行
+  tools/builtin.py           内置工具注册
+  eval/harness.py            JSONL eval runner
+  workflow/engine.py         workflow DAG engine
 assets/
+  evolva-hero.svg
   architecture.svg
-  readme-banner.svg
   tui-mockup.svg
   workflow-mcp-memory.svg
 ```
@@ -246,5 +254,6 @@ assets/
 ---
 
 <p align="center">
-  <strong>Evolva</strong> · A compact harness for local, inspectable, self-evolving agents.
+  <strong>Evolva</strong> · Local, inspectable, self-evolving agents.<br />
+  如果这个项目对你有帮助，欢迎 Star：<strong>koppx/Evolva</strong>
 </p>
