@@ -195,7 +195,17 @@ class EvalEvolutionAnalyzer:
 def apply_proposals(engine: SelfEvolutionEngine, proposals: list[EvolutionProposal]) -> list[EvolutionReport]:
     reports: list[EvolutionReport] = []
     for proposal in proposals:
-        reports.append(engine.evolve(proposal.feedback, task=proposal.task, outcome=proposal.outcome, trigger=proposal.trigger))
+        reports.append(
+            engine.evolve(
+                proposal.feedback,
+                task=proposal.task,
+                outcome=proposal.outcome,
+                trigger=proposal.trigger,
+                category=proposal.category,
+                evidence=proposal.evidence,
+                confidence=proposal.confidence,
+            )
+        )
     return reports
 
 

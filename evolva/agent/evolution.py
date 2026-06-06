@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import asdict, dataclass, field
+from hashlib import sha256
 from typing import Any
 
 from evolva.agent.memory import MemoryStore
@@ -15,7 +16,9 @@ class EvolutionReport:
     trigger: str = "manual_feedback"
     category: str = "general"
     actions: list[str] = field(default_factory=list)
+    evidence: list[str] = field(default_factory=list)
     confidence: float = 0.75
+    fingerprint: str = ""
     skill_name: str | None = None
     skill_path: str | None = None
     memory_written: bool = False
@@ -25,13 +28,20 @@ class EvolutionReport:
     def __post_init__(self) -> None:
         if not self.ts:
             self.ts = time.time()
+        if not self.fingerprint:
+            self.fingerprint = self.compute_fingerprint(self.lesson, self.category)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     def summary(self) -> str:
         status = "deduped" if self.deduped else "created"
-        return f"[{self.trigger}/{self.category}/{status}] {self.lesson}"
+        return f"[{self.trigger}/{self.category}/{status}/{self.fingerprint}] {self.lesson}"
+
+    @staticmethod
+    def compute_fingerprint(lesson: str, category: str) -> str:
+        normalized = " ".join(f"{category} {lesson}".lower().split())
+        return sha256(normalized.encode("utf-8")).hexdigest()[:12]
 
 
 class SelfEvolutionEngine:
@@ -41,20 +51,33 @@ class SelfEvolutionEngine:
         self.memory = memory
         self.skills = skills
 
-    def evolve(self, feedback: str, *, task: str = "", outcome: str = "", trigger: str = "manual_feedback") -> EvolutionReport:
+    def evolve(
+        self,
+        feedback: str,
+        *,
+        task: str = "",
+        outcome: str = "",
+        trigger: str = "manual_feedback",
+        category: str | None = None,
+        evidence: list[str] | None = None,
+        confidence: float | None = None,
+    ) -> EvolutionReport:
         feedback = feedback.strip() or "No explicit feedback; summarize recent outcome."
-        category = self._classify(feedback, task=task, outcome=outcome, trigger=trigger)
+        category = category or self._classify(feedback, task=task, outcome=outcome, trigger=trigger)
         actions = self._actions_for(category)
-        confidence = self._confidence_for(trigger, category)
-        lesson = self._lesson_from(feedback, task=task, outcome=outcome, category=category, actions=actions)
+        confidence = confidence if confidence is not None else self._confidence_for(trigger, category)
+        evidence = self._normalize_evidence(evidence or [], task=task, outcome=outcome)
+        lesson = self._lesson_from(feedback, task=task, outcome=outcome, category=category, actions=actions, evidence=evidence)
+        fingerprint = EvolutionReport.compute_fingerprint(lesson, category)
 
         duplicate = self.memory.find_similar("lesson", lesson)
         memory_written = duplicate is None
         if memory_written:
-            self.memory.add("lesson", lesson, confidence=confidence, source=f"self_evolution:{trigger}:{category}")
+            source = f"self_evolution:{trigger}:{category}:{fingerprint}"
+            self.memory.add("lesson", lesson, confidence=confidence, source=source)
 
         skill_name = self._skill_name(feedback or task or lesson, category=category)
-        skill_body = self._skill_body(lesson, category=category, actions=actions)
+        skill_body = self._skill_body(lesson, category=category, actions=actions, evidence=evidence, fingerprint=fingerprint)
         path = self.skills.upsert(
             skill_name,
             skill_body,
@@ -63,6 +86,7 @@ class SelfEvolutionEngine:
                 "trigger": trigger,
                 "category": category,
                 "confidence": f"{confidence:.2f}",
+                "fingerprint": fingerprint,
                 "deduped": str(duplicate is not None).lower(),
             },
         )
@@ -71,7 +95,9 @@ class SelfEvolutionEngine:
             trigger=trigger,
             category=category,
             actions=actions,
+            evidence=evidence,
             confidence=confidence,
+            fingerprint=fingerprint,
             skill_name=skill_name,
             skill_path=str(path),
             memory_written=memory_written,
@@ -92,8 +118,11 @@ class SelfEvolutionEngine:
     def status(self, *, recent: int = 5) -> dict[str, Any]:
         lessons = [m for m in self.memory.all(1000) if m.kind == "lesson"]
         lesson_sources: dict[str, int] = {}
+        lesson_categories: dict[str, int] = {}
         for lesson in lessons:
             lesson_sources[lesson.source] = lesson_sources.get(lesson.source, 0) + 1
+            category = self._category_from_source(lesson.source) or self._classify(lesson.content, task="", outcome="", trigger=lesson.source)
+            lesson_categories[category] = lesson_categories.get(category, 0) + 1
         recent_lessons = lessons[-recent:]
         skill_stats = self.skills.stats()
         return {
@@ -101,6 +130,7 @@ class SelfEvolutionEngine:
             "memory_stats": self.memory.stats(),
             "skill_stats": skill_stats,
             "lesson_sources": lesson_sources,
+            "lesson_categories": lesson_categories,
             "recent_lessons": [m.content for m in recent_lessons],
         }
 
@@ -114,11 +144,59 @@ class SelfEvolutionEngine:
         if status["lesson_sources"]:
             sources = ", ".join(f"{k}={v}" for k, v in sorted(status["lesson_sources"].items()))
             lines.append(f"- Lesson sources: {sources}")
+        if status["lesson_categories"]:
+            categories = ", ".join(f"{k}={v}" for k, v in sorted(status["lesson_categories"].items()))
+            lines.append(f"- Lesson categories: {categories}")
         if status["recent_lessons"]:
             lines.append("- Recent lessons:")
             lines.extend(f"  - {lesson[:180]}" for lesson in status["recent_lessons"])
         else:
             lines.append("- Recent lessons: none")
+        return "\n".join(lines)
+
+    def audit(self, *, trace_analysis: Any | None = None, eval_analysis: Any | None = None) -> dict[str, Any]:
+        """Return an inspectable self-evolution health snapshot.
+
+        The audit is intentionally stdlib/data-only so CLI, TUI, tests, and future
+        automation can reason about the evolution loop without parsing prose.
+        """
+        status = self.status(recent=8)
+        proposals = []
+        if trace_analysis is not None:
+            proposals.extend(getattr(trace_analysis, "proposals", []) or [])
+        if eval_analysis is not None:
+            proposals.extend(getattr(eval_analysis, "proposals", []) or [])
+        categories = dict(status["lesson_categories"])
+        for proposal in proposals:
+            category = getattr(proposal, "category", "general")
+            categories.setdefault(category, 0)
+        weak_categories = [name for name, count in sorted(categories.items()) if count == 0]
+        return {
+            "status": status,
+            "proposal_count": len(proposals),
+            "proposal_categories": sorted({getattr(p, "category", "general") for p in proposals}),
+            "weak_categories": weak_categories,
+            "recommendations": self._audit_recommendations(status, proposals, weak_categories),
+        }
+
+    def render_audit(self, *, trace_analysis: Any | None = None, eval_analysis: Any | None = None) -> str:
+        audit = self.audit(trace_analysis=trace_analysis, eval_analysis=eval_analysis)
+        status = audit["status"]
+        lines = [
+            "Evolution audit",
+            f"- Lessons: {status['total_lessons']}",
+            f"- Evolved skills: {status['skill_stats']['evolved']}/{status['skill_stats']['total']}",
+            f"- Pending proposals: {audit['proposal_count']}",
+        ]
+        if status["lesson_categories"]:
+            lines.append("- Categories: " + ", ".join(f"{k}={v}" for k, v in sorted(status["lesson_categories"].items())))
+        if audit["proposal_categories"]:
+            lines.append("- Proposal categories: " + ", ".join(audit["proposal_categories"]))
+        if audit["recommendations"]:
+            lines.append("- Recommended next steps:")
+            lines.extend(f"  - {item}" for item in audit["recommendations"])
+        else:
+            lines.append("- Recommended next steps: none")
         return "\n".join(lines)
 
     def _classify(self, feedback: str, *, task: str, outcome: str, trigger: str) -> str:
@@ -158,24 +236,63 @@ class SelfEvolutionEngine:
             return 0.72
         return 0.75
 
-    def _lesson_from(self, feedback: str, *, task: str, outcome: str, category: str, actions: list[str]) -> str:
+    def _lesson_from(self, feedback: str, *, task: str, outcome: str, category: str, actions: list[str], evidence: list[str]) -> str:
         bits = [f"Category: {category}", f"Feedback: {feedback}"]
         if task:
             bits.append(f"Task context: {task[:300]}")
         if outcome:
             bits.append(f"Outcome context: {outcome[:300]}")
+        if evidence:
+            bits.append("Evidence: " + "; ".join(evidence[:5]))
         bits.append("Future behavior: " + "; ".join(actions))
         return " | ".join(bits)
 
-    def _skill_body(self, lesson: str, *, category: str, actions: list[str]) -> str:
+    def _skill_body(self, lesson: str, *, category: str, actions: list[str], evidence: list[str], fingerprint: str) -> str:
         checklist = "\n".join(f"{idx}. {action}." for idx, action in enumerate(actions, start=1))
+        evidence_lines = "\n".join(f"- {item}" for item in evidence[:8]) or "- Manual feedback or runtime reflection."
         return (
+            f"## Fingerprint\n`{fingerprint}`\n\n"
             f"## Lesson\n{lesson}\n\n"
+            f"## Evidence\n{evidence_lines}\n\n"
             f"## Applies When\n- A future task matches the `{category}` pattern or similar user feedback appears.\n\n"
             f"## Checklist\n{checklist}\n\n"
             "## Verification\n- Confirm the checklist was applied before the final response.\n"
             "- If the behavior fails again, record a more specific lesson and update this skill.\n"
         )
+
+    def _normalize_evidence(self, evidence: list[str], *, task: str, outcome: str) -> list[str]:
+        rows = [str(item).strip().replace("\n", " ")[:220] for item in evidence if str(item).strip()]
+        if task:
+            rows.append("task=" + task.replace("\n", " ")[:220])
+        if outcome:
+            rows.append("outcome=" + outcome.replace("\n", " ")[:220])
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for row in rows:
+            if row not in seen:
+                seen.add(row)
+                deduped.append(row)
+        return deduped[:10]
+
+    def _category_from_source(self, source: str) -> str | None:
+        parts = source.split(":")
+        if len(parts) >= 3 and parts[0] == "self_evolution":
+            return parts[2]
+        return None
+
+    def _audit_recommendations(self, status: dict[str, Any], proposals: list[Any], weak_categories: list[str]) -> list[str]:
+        recommendations: list[str] = []
+        if proposals:
+            recommendations.append("Review and apply high-confidence trace/eval proposals with `evolva evolve trace --apply` or `evolva evolve eval --apply`.")
+        if status["total_lessons"] == 0:
+            recommendations.append("Seed the loop with direct feedback via `evolva evolve feedback ...`.")
+        if status["skill_stats"]["evolved"] < status["total_lessons"]:
+            recommendations.append("Materialize important lessons as Markdown skills so future prompts can reuse them.")
+        if weak_categories:
+            recommendations.append("Add targeted lessons for uncovered categories: " + ", ".join(weak_categories[:5]) + ".")
+        if not recommendations:
+            recommendations.append("Keep running trace/eval audits after meaningful agent sessions.")
+        return recommendations
 
     def _skill_name(self, text: str, *, category: str = "general") -> str:
         words = re.findall(r"[a-zA-Z0-9\u4e00-\u9fff]+", text.lower())[:5]

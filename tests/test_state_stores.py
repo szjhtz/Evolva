@@ -100,9 +100,12 @@ def test_self_evolution_records_memory_and_skill(tmp_path):
     assert report.category in {"preference", "verification"}
     assert report.actions
     assert report.memory_written
+    assert report.fingerprint
+    assert any("task=edit code" in item for item in report.evidence)
     assert report.skill_path
     assert "Prefer tests" in memory.context("Prefer")
-    assert "Checklist" in skills.context("Prefer")
+    skill_context = skills.context("Prefer")
+    assert "Checklist" in skill_context and "Fingerprint" in skill_context and "Evidence" in skill_context
 
     duplicate = SelfEvolutionEngine(memory, skills).evolve("Prefer tests", task="edit code", outcome="ok")
     assert duplicate.deduped
@@ -110,8 +113,24 @@ def test_self_evolution_records_memory_and_skill(tmp_path):
 
     status = SelfEvolutionEngine(memory, skills).status()
     assert status["total_lessons"] == 1
+    assert status["lesson_categories"]
     assert status["skill_stats"]["evolved"] >= 1
     assert "Evolution status" in SelfEvolutionEngine(memory, skills).render_status()
+
+
+def test_self_evolution_audit_reports_coverage_and_recommendations(tmp_path):
+    engine = SelfEvolutionEngine(MemoryStore(tmp_path / "memory.jsonl"), SkillStore(tmp_path / "skills"))
+    report = engine.evolve("Always verify Python edits", category="verification", evidence=["unit-test evidence"], confidence=0.91)
+    assert report.category == "verification"
+    assert report.confidence == 0.91
+    assert "unit-test evidence" in report.lesson
+
+    audit = engine.audit()
+    assert audit["status"]["total_lessons"] == 1
+    assert "verification" in audit["status"]["lesson_categories"]
+    assert audit["recommendations"]
+    rendered = engine.render_audit()
+    assert "Evolution audit" in rendered and "Recommended next steps" in rendered
 
 
 def test_reflect_after_turn_only_for_failures_or_long_answer(tmp_path):
@@ -138,6 +157,8 @@ def test_trace_evolution_analyzer_generates_and_applies_proposals(tmp_path):
     engine = SelfEvolutionEngine(MemoryStore(tmp_path / "memory.jsonl"), SkillStore(tmp_path / "skills"))
     reports = apply_proposals(engine, analysis.proposals)
     assert reports and any(r.trigger == "trace_analysis" for r in reports)
+    assert any(r.evidence for r in reports)
+    assert any(r.category == "safety" for r in reports)
     assert "Applied evolution reports" in render_reports(reports)
 
 

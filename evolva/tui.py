@@ -26,7 +26,7 @@ TUI keys:
   /exit          Quit
 
 Commands:
-  /help, /tools, /skills, /memory [query|stats|recent n], /context [query], /todo, /agents, /trace, /policy, /mcp, /image <path|url> [text], /evolve [feedback|status|trace|apply-trace|eval|apply-eval], /run <tool> <json>
+  /help, /tools, /skills, /memory [query|stats|recent n], /context [query], /todo, /agents, /trace, /policy, /mcp, /image <path|url> [text], /evolve [feedback|status|audit|trace|apply-trace|eval|apply-eval], /run <tool> <json>
 """.strip()
 
 
@@ -304,6 +304,10 @@ class EvolvaTUI:
                 feedback = line.removeprefix("/evolve").strip()
                 if feedback in {"status", "stats"}:
                     self._add_system(self.agent.evolution.render_status())
+                elif feedback in {"audit", "health"}:
+                    trace_analysis = TraceEvolutionAnalyzer(self.agent.tracer).analyze()
+                    eval_analysis = EvalEvolutionAnalyzer(self.agent.config.eval_results_dir).analyze_file()
+                    self._add_system(self.agent.evolution.render_audit(trace_analysis=trace_analysis, eval_analysis=eval_analysis))
                 elif feedback in {"trace", "analyze", "analyze-traces"}:
                     self._add_system(render_analysis(TraceEvolutionAnalyzer(self.agent.tracer).analyze()))
                 elif feedback in {"apply-trace", "apply-traces"}:

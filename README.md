@@ -110,12 +110,13 @@ Future Prompt Context
 示例：
 
 ```bash
+python3 -m evolva.cli evolve audit --show-proposals
 python3 -m evolva.cli evolve feedback "以后写 Python 文件后自动运行语法检查和 pytest"
 python3 -m evolva.cli evolve trace --apply
 python3 -m evolva.cli evolve eval --apply
 ```
 
-它会把反馈或失败模式提炼成 lesson，写入长期记忆，并可生成 Markdown Skill，让后续任务自动带上这些经验。
+它会把反馈或失败模式提炼成带 **category / confidence / evidence / fingerprint** 的 lesson，写入长期记忆，并可生成 Markdown Skill，让后续任务自动带上这些经验。`evolve audit` 会汇总当前 lesson 覆盖、已进化技能、Trace/Eval 待处理 proposal 和下一步建议。
 
 ## 常用命令
 
@@ -143,6 +144,7 @@ python3 -m evolva.cli mcp call filesystem list_directory '{"path":"."}' --yes
 
 # Self-evolution
 python3 -m evolva.cli evolve status
+python3 -m evolva.cli evolve audit --show-proposals
 python3 -m evolva.cli evolve trace --apply
 python3 -m evolva.cli evolve eval --apply
 ```

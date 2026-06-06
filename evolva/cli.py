@@ -37,6 +37,7 @@ Commands:
                        Ask with one image
   /evolve [feedback]   Turn feedback into memory + skill
   /evolve status       Show evolution status
+  /evolve audit        Audit lessons, skills, traces, and eval proposals
   /evolve trace        Analyze traces for evolution proposals
   /evolve apply-trace  Analyze traces and apply proposals
   /evolve eval [json]  Analyze eval failures for proposals
@@ -137,6 +138,11 @@ def handle_command(agent: EvolvaAgent, line: str) -> bool:
         feedback = line.removeprefix("/evolve").strip()
         if feedback in {"status", "stats"}:
             print(agent.evolution.render_status())
+            return True
+        if feedback in {"audit", "health"}:
+            trace_analysis = TraceEvolutionAnalyzer(agent.tracer).analyze()
+            eval_analysis = EvalEvolutionAnalyzer(agent.config.eval_results_dir).analyze_file()
+            print(agent.evolution.render_audit(trace_analysis=trace_analysis, eval_analysis=eval_analysis))
             return True
         if feedback in {"trace", "analyze", "analyze-traces"}:
             print(render_analysis(TraceEvolutionAnalyzer(agent.tracer).analyze()))
@@ -289,6 +295,14 @@ def evolve_cmd(args: argparse.Namespace) -> int:
     if args.evolve_cmd == "status":
         print(agent.evolution.render_status())
         return 0
+    if args.evolve_cmd == "audit":
+        trace_analysis = TraceEvolutionAnalyzer(agent.tracer).analyze(limit=args.limit)
+        eval_analysis = EvalEvolutionAnalyzer(agent.config.eval_results_dir).analyze_file(args.report)
+        print(agent.evolution.render_audit(trace_analysis=trace_analysis, eval_analysis=eval_analysis))
+        if args.show_proposals:
+            print(render_analysis(trace_analysis))
+            print(render_analysis(eval_analysis))
+        return 0
     if args.evolve_cmd == "trace":
         analysis = TraceEvolutionAnalyzer(agent.tracer).analyze(limit=args.limit)
         print(render_analysis(analysis))
@@ -359,6 +373,11 @@ def build_parser() -> argparse.ArgumentParser:
     evolve_sub = evolve_p.add_subparsers(dest="evolve_cmd", required=True)
     evolve_status = evolve_sub.add_parser("status", help="Show evolution status")
     evolve_status.set_defaults(func=evolve_cmd)
+    evolve_audit = evolve_sub.add_parser("audit", help="Audit self-evolution coverage and pending proposals")
+    evolve_audit.add_argument("--limit", type=int, default=20, help="Trace run limit for proposal analysis")
+    evolve_audit.add_argument("--report", nargs="?", type=lambda s: __import__("pathlib").Path(s), help="Eval report JSON; defaults to latest")
+    evolve_audit.add_argument("--show-proposals", action="store_true", help="Print trace/eval proposal details")
+    evolve_audit.set_defaults(func=evolve_cmd)
     evolve_trace = evolve_sub.add_parser("trace", help="Analyze traces for evolution proposals")
     evolve_trace.add_argument("--limit", type=int, default=20)
     evolve_trace.add_argument("--apply", action="store_true", help="Apply generated proposals as lessons/skills")

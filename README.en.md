@@ -103,12 +103,13 @@ Future Prompt Context
 Examples:
 
 ```bash
+python3 -m evolva.cli evolve audit --show-proposals
 python3 -m evolva.cli evolve feedback "After editing Python files, run syntax checks and pytest."
 python3 -m evolva.cli evolve trace --apply
 python3 -m evolva.cli evolve eval --apply
 ```
 
-The resulting lessons are persisted in memory and can be materialized as Markdown skills for future context injection.
+The resulting lessons include **category / confidence / evidence / fingerprint**, are persisted in memory, and can be materialized as Markdown skills for future context injection. `evolve audit` summarizes lesson coverage, evolved skills, pending Trace/Eval proposals, and recommended next steps.
 
 ## Daily Commands
 
@@ -136,6 +137,7 @@ python3 -m evolva.cli mcp call filesystem list_directory '{"path":"."}' --yes
 
 # Self-evolution
 python3 -m evolva.cli evolve status
+python3 -m evolva.cli evolve audit --show-proposals
 python3 -m evolva.cli evolve trace --apply
 python3 -m evolva.cli evolve eval --apply
 ```

@@ -265,11 +265,11 @@ def test_cli_parser_main_once_and_handle_commands(monkeypatch, capsys, temp_conf
     assert "已记住" in capsys.readouterr().out
 
     agent = EvolvaAgent(temp_config, assume_yes=True)
-    for line in ["/help", "/tools", "/skills", "/memory", "/memory stats", "/memory recent 2", "/memory search cli", "/context", "/todo", "/todo add task", "/todo done 1", "/agents", "/trace list", "/policy", "/mcp", "/mcp tools", "/evolve feedback", "/evolve status", "/evolve trace", "/evolve apply-trace", "/evolve eval", "/workflow", "/run sandbox_info {}", "/unknown"]:
+    for line in ["/help", "/tools", "/skills", "/memory", "/memory stats", "/memory recent 2", "/memory search cli", "/context", "/todo", "/todo add task", "/todo done 1", "/agents", "/trace list", "/policy", "/mcp", "/mcp tools", "/evolve feedback", "/evolve status", "/evolve audit", "/evolve trace", "/evolve apply-trace", "/evolve eval", "/workflow", "/run sandbox_info {}", "/unknown"]:
         assert handle_command(agent, line) is True
     assert handle_command(agent, "/exit") is False
     output = capsys.readouterr().out
-    assert "Commands:" in output and "Sandbox root" in output and "Evolution status" in output and "Unknown command" in output
+    assert "Commands:" in output and "Sandbox root" in output and "Evolution audit" in output and "Evolution status" in output and "Unknown command" in output
 
 
 def test_cli_mcp_cmd_json_error_and_success(monkeypatch, capsys, temp_config):
@@ -284,6 +284,8 @@ def test_cli_evolve_cmd_status_trace_eval_and_feedback(monkeypatch, capsys, temp
     monkeypatch.setattr("evolva.cli.AgentConfig", lambda: temp_config)
     assert evolve_cmd(Namespace(evolve_cmd="status")) == 0
     assert "Evolution status" in capsys.readouterr().out
+    assert evolve_cmd(Namespace(evolve_cmd="audit", limit=5, report=None, show_proposals=True)) == 0
+    assert "Evolution audit" in capsys.readouterr().out
     assert evolve_cmd(Namespace(evolve_cmd="trace", limit=5, apply=False)) == 0
     assert "Evolution analysis: trace" in capsys.readouterr().out
     assert evolve_cmd(Namespace(evolve_cmd="feedback", feedback="Prefer concise verification")) == 0
@@ -319,6 +321,8 @@ def test_tui_non_curses_command_completion_queue_and_confirmation(monkeypatch, t
     assert any("TUI memory detail" in m.text for m in app.messages)
     app._handle_command("/evolve status")
     assert any("Evolution status" in m.text for m in app.messages)
+    app._handle_command("/evolve audit")
+    assert any("Evolution audit" in m.text for m in app.messages)
     app._handle_command("/evolve trace")
     assert any("Evolution analysis: trace" in m.text for m in app.messages)
     app.queue.put(("tool_result", ("sandbox_info", True, "ok")))
