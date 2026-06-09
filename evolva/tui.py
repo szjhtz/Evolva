@@ -79,8 +79,8 @@ class EvolvaTUI:
 
     def _main(self, stdscr: Any) -> int:
         self.stdscr = stdscr
-        curses.curs_set(1)
-        curses.use_default_colors()
+        self._safe_curs_set(1)
+        self._safe_use_default_colors()
         self._init_colors()
         stdscr.keypad(True)
         stdscr.timeout(100)
@@ -98,12 +98,35 @@ class EvolvaTUI:
                 return 0
 
     def _init_colors(self) -> None:
-        curses.start_color()
-        curses.init_pair(1, curses.COLOR_CYAN, -1)    # user
-        curses.init_pair(2, curses.COLOR_GREEN, -1)   # agent
-        curses.init_pair(3, curses.COLOR_YELLOW, -1)  # system/status
-        curses.init_pair(4, curses.COLOR_MAGENTA, -1) # tools
-        curses.init_pair(5, curses.COLOR_RED, -1)     # errors
+        try:
+            curses.start_color()
+            curses.init_pair(1, curses.COLOR_CYAN, -1)    # user
+            curses.init_pair(2, curses.COLOR_GREEN, -1)   # agent
+            curses.init_pair(3, curses.COLOR_YELLOW, -1)  # system/status
+            curses.init_pair(4, curses.COLOR_MAGENTA, -1) # tools
+            curses.init_pair(5, curses.COLOR_RED, -1)     # errors
+        except (curses.error, ValueError):
+            # Some pseudo terminals support curses drawing but not color pairs.
+            # Keep TUI startup resilient and fall back to A_NORMAL rendering.
+            pass
+
+    def _safe_curs_set(self, visibility: int) -> None:
+        try:
+            curses.curs_set(visibility)
+        except (curses.error, ValueError):
+            pass
+
+    def _safe_use_default_colors(self) -> None:
+        try:
+            curses.use_default_colors()
+        except (curses.error, ValueError):
+            pass
+
+    def _color(self, pair: int, extra: int = 0) -> int:
+        try:
+            return curses.color_pair(pair) | extra
+        except (curses.error, ValueError):
+            return curses.A_NORMAL | extra
 
     def request_confirmation(self, prompt: str) -> bool:
         event = threading.Event()
@@ -540,9 +563,9 @@ class EvolvaTUI:
     def _draw_title(self, y: int, w: int) -> None:
         model = self.agent.config.model if self.agent.llm.available else "rule-mode"
         title = f" Evolva TUI | model={model} | F2 model | Ctrl+R traces | Ctrl+X ctx | Ctrl+T tools | /help "
-        self.stdscr.attron(curses.color_pair(3) | curses.A_BOLD)
+        self.stdscr.attron(self._color(3, curses.A_BOLD))
         self.stdscr.addnstr(y, 0, title.ljust(w), w - 1)
-        self.stdscr.attroff(curses.color_pair(3) | curses.A_BOLD)
+        self.stdscr.attroff(self._color(3, curses.A_BOLD))
 
     def _draw_chat(self, y: int, x: int, h: int, w: int) -> None:
         lines: list[tuple[str, int]] = []
@@ -556,29 +579,29 @@ class EvolvaTUI:
         visible = lines[max(0, len(lines) - h - self.scroll) : max(0, len(lines) - self.scroll) if self.scroll else len(lines)]
         start = max(0, h - len(visible))
         for idx, (line, color) in enumerate(visible[-h:]):
-            attr = curses.color_pair(color) if color else curses.A_NORMAL
+            attr = self._color(color) if color else curses.A_NORMAL
             self.stdscr.addnstr(y + start + idx, x, line.ljust(w), w - 1, attr)
         if self.scroll:
             marker = f"-- scrolled {self.scroll} --"
-            self.stdscr.addnstr(y, x + max(0, w - len(marker) - 1), marker, len(marker), curses.color_pair(3))
+            self.stdscr.addnstr(y, x + max(0, w - len(marker) - 1), marker, len(marker), self._color(3))
 
     def _draw_tools(self, y: int, x: int, h: int, w: int) -> None:
         for row in range(h):
             self.stdscr.addch(y + row, x, curses.ACS_VLINE)
         title = " Tool Logs "
-        self.stdscr.addnstr(y, x + 1, title.ljust(w - 2), w - 2, curses.color_pair(4) | curses.A_BOLD)
+        self.stdscr.addnstr(y, x + 1, title.ljust(w - 2), w - 2, self._color(4, curses.A_BOLD))
         raw_lines: list[str] = []
         for log in self.tool_logs[-20:]:
             raw_lines.extend(self._wrap(log, max(10, w - 3)))
             raw_lines.append("-" * max(1, w - 3))
         visible = raw_lines[-(h - 1) :]
         for i, line in enumerate(visible, start=1):
-            self.stdscr.addnstr(y + i, x + 1, line.ljust(w - 2), w - 2, curses.color_pair(4))
+            self.stdscr.addnstr(y + i, x + 1, line.ljust(w - 2), w - 2, self._color(4))
 
     def _draw_status(self, y: int, w: int) -> None:
         left = " BUSY " if self.busy else " READY "
         status = f"{left} {self.status}"
-        self.stdscr.addnstr(y, 0, status.ljust(w), w - 1, curses.color_pair(3) | curses.A_REVERSE)
+        self.stdscr.addnstr(y, 0, status.ljust(w), w - 1, self._color(3, curses.A_REVERSE))
 
     def _draw_input(self, y: int, w: int) -> None:
         prompt = "You> "
@@ -588,7 +611,7 @@ class EvolvaTUI:
         self.stdscr.addnstr(y, len(prompt), display.ljust(width), width)
         self.stdscr.move(y, min(w - 2, len(prompt) + len(display)))
         hint = "Enter send | Tab complete | F2 model | Ctrl+R traces | Ctrl+X trace ctx | Esc clear"
-        self.stdscr.addnstr(y + 1, 0, hint.ljust(w), w - 1, curses.color_pair(3))
+        self.stdscr.addnstr(y + 1, 0, hint.ljust(w), w - 1, self._color(3))
 
     def _wrap(self, text: str, width: int) -> list[str]:
         out: list[str] = []
