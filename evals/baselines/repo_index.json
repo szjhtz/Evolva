@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "name": "repo_index",
+  "summary": {
+    "total": 2,
+    "passed": 2,
+    "failed": 0,
+    "avg_score": 1.0
+  },
+  "tasks": {
+    "repo_index_build_001": {
+      "passed": true,
+      "min_score": 1.0
+    },
+    "repo_index_search_self_evolution_001": {
+      "passed": true,
+      "min_score": 1.0
+    }
+  }
+}

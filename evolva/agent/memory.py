@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -14,10 +15,20 @@ class MemoryItem:
     confidence: float = 0.7
     source: str = "user"
     ts: float = 0.0
+    id: str = ""
+    evidence: list[str] | None = None
+    status: str = "active"
+    version: int = 1
+    supersedes: str = ""
 
     def __post_init__(self) -> None:
         if not self.ts:
             self.ts = time.time()
+        if self.evidence is None:
+            self.evidence = []
+        if not self.id:
+            base = f"{self.kind}\n{self.content}\n{self.source}\n{self.ts:.6f}"
+            self.id = hashlib.sha256(base.encode("utf-8")).hexdigest()[:16]
 
 
 class MemoryStore:
@@ -25,13 +36,41 @@ class MemoryStore:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
-    def add(self, kind: str, content: str, *, confidence: float = 0.7, source: str = "user") -> MemoryItem:
-        item = MemoryItem(kind=kind, content=content.strip(), confidence=confidence, source=source)
+    def add(
+        self,
+        kind: str,
+        content: str,
+        *,
+        confidence: float = 0.7,
+        source: str = "user",
+        evidence: list[str] | None = None,
+        status: str = "active",
+        supersedes: str = "",
+    ) -> MemoryItem:
+        item = MemoryItem(kind=kind, content=content.strip(), confidence=confidence, source=source, evidence=evidence or [], status=status, supersedes=supersedes)
         if not item.content:
             return item
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(asdict(item), ensure_ascii=False) + "\n")
         return item
+
+    def rollback(self, item_id: str, *, reason: str = "manual rollback") -> bool:
+        """Mark a memory as rolled back without deleting historical evidence."""
+        items = self.all(100000)
+        changed = False
+        for item in items:
+            if item.id == item_id:
+                item.status = "rolled_back"
+                item.evidence = [*(item.evidence or []), reason]
+                changed = True
+        if not changed:
+            return False
+        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            for item in items:
+                f.write(json.dumps(asdict(item), ensure_ascii=False) + "\n")
+        tmp.replace(self.path)
+        return True
 
     def find_similar(self, kind: str, content: str, *, threshold: float = 0.92, limit: int = 500) -> MemoryItem | None:
         """Return a near-duplicate memory item when one already exists."""
@@ -72,7 +111,7 @@ class MemoryStore:
         lines = []
         for item in items:
             ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(item.ts))
-            lines.append(f"- [{item.kind}/{item.confidence:.1f}] {item.content} ({item.source}, {ts})")
+            lines.append(f"- [{item.kind}/{item.confidence:.1f}/{item.status}] {item.content} ({item.source}, {ts}, id={item.id})")
         return "\n".join(lines)
 
     def all(self, limit: int = 50) -> list[MemoryItem]:
@@ -94,7 +133,9 @@ class MemoryStore:
             return self.all(limit)
         scored: list[tuple[int, MemoryItem]] = []
         for item in self.all(1000):
-            hay = f"{item.kind} {item.content} {item.source}".lower()
+            if item.status == "rolled_back":
+                continue
+            hay = f"{item.kind} {item.content} {item.source} {' '.join(item.evidence or [])}".lower()
             score = sum(1 for token in q.split() if token in hay)
             if q in hay:
                 score += 3
@@ -107,7 +148,7 @@ class MemoryStore:
         items = self.search(query, limit=6)
         if not items:
             return "No relevant memories."
-        return "\n".join(f"- [{m.kind}/{m.confidence:.1f}] {m.content}" for m in items)
+        return "\n".join(f"- [{m.kind}/{m.confidence:.1f}/{m.status}] {m.content}" for m in items if m.status != "rolled_back")
 
     def _normalize(self, text: str) -> str:
         return " ".join(text.lower().strip().split())

@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test-and-eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Evolva
+        run: python -m pip install -e ".[dev]"
+      - name: Compile
+        run: python -m compileall evolva tests
+      - name: Unit tests
+        run: python -m pytest -q
+      - name: Eval gate - core smoke
+        run: python -m evolva.cli eval evals/tasks/smoke.jsonl --yes --baseline evals/baselines/smoke.json --min-score 1.0 --no-regression
+      - name: Eval gate - repo index
+        run: python -m evolva.cli eval evals/tasks/repo_index.jsonl --yes --baseline evals/baselines/repo_index.json --min-score 1.0 --no-regression

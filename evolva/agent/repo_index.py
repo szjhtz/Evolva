@@ -8,7 +8,7 @@ from collections import Counter
 from dataclasses import asdict, dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Protocol
 
 
 @dataclass
@@ -34,6 +34,14 @@ class RepoIndexSnapshot:
     chunks: list[CodeChunk]
     built_at: float
     backend: str
+
+
+class RepoIndexBackend(Protocol):
+    """Parser/vector backend contract for repository indexing."""
+
+    name: str
+
+    def chunk_file(self, rel: str, text: str, language: str) -> list[CodeChunk]: ...
 
 
 class RepoIndex:
@@ -102,6 +110,26 @@ class RepoIndex:
         snapshot = RepoIndexSnapshot(root=str(self.root), chunks=chunks, built_at=time.time(), backend=self._backend_name())
         self._write(snapshot)
         return snapshot
+
+    def build_if_stale(self, *, max_age_seconds: int = 3600, max_files: int = 1000) -> RepoIndexSnapshot:
+        """Load an existing snapshot unless it is older than max_age_seconds."""
+        snapshot = self.load()
+        if snapshot and time.time() - snapshot.built_at <= max_age_seconds:
+            return snapshot
+        return self.build(max_files=max_files)
+
+    def capabilities(self) -> dict[str, object]:
+        """Return feature flags for transparent README/TUI reporting."""
+        backend = self._backend_name()
+        return {
+            "backend": backend,
+            "local_first": True,
+            "network": False,
+            "symbol_chunks": True,
+            "reference_tokens": True,
+            "lexical_vectors": True,
+            "tree_sitter_available": backend.startswith("tree_sitter_available"),
+        }
 
     def load(self) -> RepoIndexSnapshot | None:
         """Load the latest persisted snapshot, returning None if absent or invalid."""

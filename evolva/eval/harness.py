@@ -22,6 +22,17 @@ class EvalResult:
     duration_ms: int = 0
 
 
+@dataclass
+class EvalGateResult:
+    """Result of comparing an eval run with local quality gates and baselines."""
+
+    ok: bool
+    current: dict[str, Any]
+    baseline: dict[str, Any] | None = None
+    messages: list[str] = field(default_factory=list)
+    regressions: list[str] = field(default_factory=list)
+
+
 class EvalHarness:
     """Small stdlib eval harness for agent regression baselines."""
 
@@ -111,6 +122,109 @@ class EvalHarness:
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return path
 
+    def report_payload(self, results: list[EvalResult], *, name: str = "eval") -> dict[str, Any]:
+        """Return a stable report payload suitable for CI baselines."""
+        return {
+            "version": 1,
+            "name": name,
+            "summary": self.summary(results),
+            "tasks": {
+                result.id: {
+                    "passed": result.passed,
+                    "score": result.score,
+                    "checks": result.checks,
+                    "duration_ms": result.duration_ms,
+                }
+                for result in results
+            },
+        }
+
+    def gate(
+        self,
+        results: list[EvalResult],
+        *,
+        baseline_path: Path | None = None,
+        min_score: float | None = None,
+        no_regression: bool = False,
+        name: str = "eval",
+    ) -> EvalGateResult:
+        """Evaluate results against score thresholds and an optional baseline.
+
+        The gate is intentionally deterministic and local-only so it can run in
+        CI without an external service. Baseline files are JSON reports produced
+        by :meth:`report_payload` or older reports that contain `summary` and
+        `results`.
+        """
+        current = self.report_payload(results, name=name)
+        messages: list[str] = []
+        regressions: list[str] = []
+        baseline = self.load_baseline(baseline_path) if baseline_path else None
+        avg_score = float(current["summary"].get("avg_score", 0.0))
+        if min_score is not None and avg_score < min_score:
+            regressions.append(f"avg_score {avg_score:.3f} is below required {min_score:.3f}")
+        failed = int(current["summary"].get("failed", 0))
+        if failed:
+            regressions.append(f"{failed} eval task(s) failed")
+        if baseline and no_regression:
+            regressions.extend(self.compare_reports(current, baseline))
+        if baseline_path:
+            messages.append(f"baseline={baseline_path}")
+        if min_score is not None:
+            messages.append(f"min_score={min_score:.3f}")
+        if no_regression:
+            messages.append("no_regression=true")
+        return EvalGateResult(ok=not regressions, current=current, baseline=baseline, messages=messages, regressions=regressions)
+
+    def load_baseline(self, path: Path | None) -> dict[str, Any] | None:
+        if path is None:
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {"version": 1, "missing": str(path), "summary": {}, "tasks": {}}
+        except Exception:
+            return {"version": 1, "invalid": str(path), "summary": {}, "tasks": {}}
+        if "tasks" in payload:
+            return payload
+        tasks = {}
+        for item in payload.get("results", []):
+            task_id = str(item.get("id", "unnamed"))
+            tasks[task_id] = {
+                "passed": bool(item.get("passed", False)),
+                "score": float(item.get("score", 0.0)),
+                "checks": item.get("checks", {}),
+                "duration_ms": int(item.get("duration_ms", 0)),
+            }
+        return {"version": 1, "summary": payload.get("summary", {}), "tasks": tasks}
+
+    def compare_reports(self, current: dict[str, Any], baseline: dict[str, Any]) -> list[str]:
+        """Return human-readable regressions from baseline to current."""
+        regressions: list[str] = []
+        if baseline.get("missing"):
+            regressions.append(f"baseline missing: {baseline['missing']}")
+            return regressions
+        if baseline.get("invalid"):
+            regressions.append(f"baseline invalid: {baseline['invalid']}")
+            return regressions
+        current_tasks = current.get("tasks", {})
+        baseline_tasks = baseline.get("tasks", {})
+        for task_id, expected in baseline_tasks.items():
+            actual = current_tasks.get(task_id)
+            if actual is None:
+                regressions.append(f"task {task_id} missing from current run")
+                continue
+            if bool(expected.get("passed", False)) and not bool(actual.get("passed", False)):
+                regressions.append(f"task {task_id} regressed from pass to fail")
+            expected_score = float(expected.get("min_score", expected.get("score", 0.0)))
+            actual_score = float(actual.get("score", 0.0))
+            if actual_score + 1e-9 < expected_score:
+                regressions.append(f"task {task_id} score {actual_score:.3f} below baseline {expected_score:.3f}")
+        base_avg = baseline.get("summary", {}).get("avg_score")
+        cur_avg = current.get("summary", {}).get("avg_score")
+        if base_avg is not None and cur_avg is not None and float(cur_avg) + 1e-9 < float(base_avg):
+            regressions.append(f"avg_score {float(cur_avg):.3f} below baseline {float(base_avg):.3f}")
+        return regressions
+
     def summary(self, results: list[EvalResult]) -> dict[str, Any]:
         total = len(results)
         passed = sum(1 for r in results if r.passed)
@@ -125,4 +239,18 @@ def render_results(results: list[EvalResult]) -> str:
     for result in results:
         mark = "PASS" if result.passed else "FAIL"
         lines.append(f"- {mark} {result.id} score={result.score:.2f} duration={result.duration_ms}ms checks={result.checks}")
+    return "\n".join(lines)
+
+
+def render_gate(gate: EvalGateResult) -> str:
+    """Render CI gate output in a compact human-readable form."""
+    summary = gate.current.get("summary", {})
+    lines = [
+        "Eval gate: " + ("PASS" if gate.ok else "FAIL"),
+        f"- total={summary.get('total', 0)} passed={summary.get('passed', 0)} failed={summary.get('failed', 0)} avg_score={float(summary.get('avg_score', 0.0)):.3f}",
+    ]
+    for message in gate.messages:
+        lines.append(f"- {message}")
+    for regression in gate.regressions:
+        lines.append(f"- REGRESSION: {regression}")
     return "\n".join(lines)

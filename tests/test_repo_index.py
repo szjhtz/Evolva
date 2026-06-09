@@ -26,6 +26,7 @@ def test_repo_index_builds_symbol_chunks_and_searches(tmp_path: Path) -> None:
 
     assert snapshot.chunks
     assert snapshot.backend in {"stdlib_symbol_vectors", "tree_sitter_available+stdlib_symbol_vectors"}
+    assert index.capabilities()["local_first"] is True
     results = index.search("SelfEvolutionEngine evolve", limit=3)
     assert results
     assert results[0].path == "pkg/evolution.py"
@@ -39,9 +40,11 @@ def test_repo_index_persists_and_loads(tmp_path: Path) -> None:
 
     built = index.build()
     loaded = index.load()
+    fresh = index.build_if_stale(max_age_seconds=3600)
 
     assert loaded is not None
     assert len(loaded.chunks) == len(built.chunks)
+    assert fresh.built_at == loaded.built_at
     assert index.search("Trace Eval")
 
 

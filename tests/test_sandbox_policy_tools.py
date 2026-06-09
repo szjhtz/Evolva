@@ -25,6 +25,7 @@ def test_sandbox_resolve_and_describe(tmp_path):
     sandbox = Sandbox(SandboxPolicy(tmp_path, tmp_path / "workspace"))
     assert sandbox.resolve("workspace/a.txt") == (tmp_path / "workspace" / "a.txt").resolve()
     assert "shell=enabled" in sandbox.describe()
+    assert "backend=local" in sandbox.describe()
     with pytest.raises(ValueError, match="escapes"):
         sandbox.resolve("../escape.txt")
 
@@ -38,6 +39,7 @@ def test_sandbox_shell_disabled_dangerous_timeout_and_python(tmp_path):
     assert not sandbox.run_shell("echo hi", cwd="missing").ok
     ok = sandbox.run_shell("printf hello", cwd=".")
     assert ok.ok and ok.output == "hello"
+    assert ok.data["backend"] == "local"
     py_ok = sandbox.run_python("print('py')")
     assert py_ok.ok and py_ok.output == "py"
     py_bad = sandbox.run_python("raise SystemExit(3)")

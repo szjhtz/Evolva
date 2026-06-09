@@ -12,7 +12,7 @@ from evolva.agent.mcp import MCPClient, MCPManager, MCPServerConfig, render_mcp_
 from evolva.agent.multi_agent import MultiAgentCoordinator
 from evolva.agent.tracing import TraceRecorder
 from evolva.cli import build_parser, dream_cmd, evolve_cmd, handle_command, main, mcp_cmd, once, optimize_cmd
-from evolva.eval.harness import EvalHarness, EvalResult, render_results
+from evolva.eval.harness import EvalHarness, EvalResult, render_gate, render_results
 from evolva.tui import EvolvaTUI, TUIConfirmation
 from evolva.workflow.engine import WorkflowEngine
 
@@ -165,6 +165,30 @@ def test_workflow_engine_tool_role_agent_templates_and_errors(temp_config):
     assert continued.ok and "Sandbox root" in continued.outputs["y"]
 
 
+def test_workflow_engine_runs_explicit_dag_and_rejects_cycles(temp_config):
+    agent = EvolvaAgent(temp_config, assume_yes=True)
+    wf = WorkflowEngine(agent)
+    result = wf.run(
+        {
+            "id": "dag",
+            "nodes": [
+                {"id": "read", "depends_on": ["write"], "type": "tool", "tool": "read_file", "args": {"path": "evolva/workspace/dag.txt"}},
+                {"id": "write", "depends_on": [], "type": "tool", "tool": "write_file", "args": {"path": "evolva/workspace/dag.txt", "content": "dag-ok"}},
+            ],
+        }
+    )
+    assert result.ok
+    assert list(result.outputs) == ["write", "read"]
+    assert result.outputs["read"] == "dag-ok"
+    assert "depends_on=write" in "\n".join(result.logs)
+
+    cycle = wf.run({"id": "cycle", "nodes": [{"id": "a", "depends_on": ["b"]}, {"id": "b", "depends_on": ["a"]}]})
+    assert not cycle.ok and "cycle" in cycle.logs[0]
+
+    missing = wf.run({"id": "missing", "nodes": [{"id": "a", "depends_on": ["b"]}]})
+    assert not missing.ok and "missing node" in missing.logs[0]
+
+
 def test_eval_harness_score_summary_report_and_run_file(temp_config, tmp_path):
     harness = EvalHarness(temp_config, assume_yes=True)
     harness.agent.memory.add("fact", "Eval remembers memory state")
@@ -199,6 +223,12 @@ def test_eval_harness_score_summary_report_and_run_file(temp_config, tmp_path):
     report = harness.write_report(results, "unit")
     assert report.exists()
     assert "PASS a" in render_results(results)
+    gate = harness.gate(results, min_score=0.4)
+    assert not gate.ok and "eval task" in "\n".join(gate.regressions)
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(json.dumps(harness.report_payload([EvalResult("a", True, 1.0, {}, "ok")], name="unit")))
+    regression = harness.gate([EvalResult("a", False, 0.0, {}, "bad")], baseline_path=baseline, no_regression=True)
+    assert not regression.ok and "regressed" in render_gate(regression)
 
     tasks = tmp_path / "tasks.jsonl"
     tasks.write_text('\n# comment\n{"id":"fallback","input":"remember eval","expected_contains":["已记住"],"scorers":["no_tool_error"]}\n')
@@ -262,6 +292,8 @@ def test_cli_parser_main_once_and_handle_commands(monkeypatch, capsys, temp_conf
     chat_args = parser.parse_args(["--chat", "--yes"])
     assert chat_args.cmd is None and chat_args.chat and chat_args.yes
     assert parser.parse_args(["mcp", "call", "s", "t", "{}", "--yes"]).mcp_cmd == "call"
+    parsed_eval = parser.parse_args(["eval", "evals/tasks/smoke.jsonl", "--baseline", "evals/baselines/smoke.json", "--min-score", "1.0", "--no-regression"])
+    assert parsed_eval.no_regression and parsed_eval.min_score == 1.0
     parsed_mcp_add = parser.parse_args(["mcp", "add", "fs", "npx", "-y", "server", "."])
     assert parsed_mcp_add.mcp_cmd == "add" and parsed_mcp_add.args == ["-y", "server", "."]
     assert parser.parse_args(["evolve", "trace", "--apply"]).evolve_cmd == "trace"

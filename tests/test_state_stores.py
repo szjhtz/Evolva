@@ -27,15 +27,18 @@ def test_memory_ignores_empty_and_malformed_rows(tmp_path):
 
 def test_memory_search_ranks_exact_matches(tmp_path):
     store = MemoryStore(tmp_path / "memory.jsonl")
-    store.add("fact", "Use pytest for unit tests", source="a")
+    item = store.add("fact", "Use pytest for unit tests", source="a", evidence=["trace:1"])
     store.add("lesson", "Always run compileall", source="b")
     assert store.search("pytest")[0].content == "Use pytest for unit tests"
+    assert store.search("trace:1")[0].id == item.id
     assert len(store.all(limit=1)) == 1
     assert store.find_similar("fact", "Use pytest for unit tests") is not None
     assert store.stats()["total"] == 2
     assert "fact: 1" in store.render_stats()
     assert "Use pytest for unit tests" in store.render_items(query="pytest")
     assert "Always run compileall" in store.render_items(limit=1)
+    assert store.rollback(item.id, reason="bad lesson")
+    assert not store.search("pytest")
 
 
 def test_skill_store_seeds_sanitizes_and_appends(tmp_path):
@@ -47,6 +50,10 @@ def test_skill_store_seeds_sanitizes_and_appends(tmp_path):
     text = path.read_text()
     assert "source: self_evolution" in text and "Run py_compile" in text and "Run pytest" in text
     assert "check_python" in skills.context("pytest")
+    assert skills.list()[0].metadata is not None
+    triggered = skills.upsert("Trace Guard", "Inspect trace before promotion", metadata={"triggers": ["trace", "promotion"], "source": "manual"})
+    assert triggered.exists()
+    assert skills.match("promotion gate")[0].name == "trace_guard"
     assert skills.stats()["evolved"] == 1
 
 

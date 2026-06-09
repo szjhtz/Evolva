@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "name": "smoke",
+  "summary": {
+    "total": 2,
+    "passed": 2,
+    "failed": 0,
+    "avg_score": 1.0
+  },
+  "tasks": {
+    "fallback_memory_help_001": {
+      "passed": true,
+      "min_score": 1.0
+    },
+    "dream_report_001": {
+      "passed": true,
+      "min_score": 1.0
+    }
+  }
+}

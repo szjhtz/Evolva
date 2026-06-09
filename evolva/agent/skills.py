@@ -12,6 +12,7 @@ class Skill:
     name: str
     content: str
     path: Path
+    metadata: dict[str, Any] | None = None
 
 
 class SkillStore:
@@ -35,19 +36,31 @@ class SkillStore:
     def list(self) -> list[Skill]:
         skills: list[Skill] = []
         for path in sorted(self.directory.glob("*.md")):
-            skills.append(Skill(path.stem, path.read_text(encoding="utf-8"), path))
+            content = path.read_text(encoding="utf-8")
+            metadata, body = self._parse_frontmatter(content)
+            skills.append(Skill(path.stem, body, path, metadata))
         return skills
+
+    def match(self, query: str, *, limit: int = 5) -> list[Skill]:
+        """Return skills selected by manifest triggers and lexical relevance."""
+        q = query.lower().strip()
+        scored: list[tuple[int, Skill]] = []
+        for skill in self.list():
+            metadata = skill.metadata or {}
+            triggers = self._metadata_list(metadata.get("triggers")) + self._metadata_list(metadata.get("keywords"))
+            hay = (skill.name + "\n" + skill.content + "\n" + " ".join(triggers)).lower()
+            score = sum(2 for trigger in triggers if trigger.lower() and trigger.lower() in q)
+            score += sum(1 for token in q.split() if token in hay)
+            if not q or score:
+                scored.append((score, skill))
+        scored.sort(key=lambda item: (item[0], item[1].name), reverse=True)
+        return [skill for _, skill in scored[:limit]]
 
     def context(self, query: str = "") -> str:
         skills = self.list()
         if not skills:
             return "No skills."
-        q = query.lower()
-        selected = []
-        for skill in skills:
-            hay = (skill.name + "\n" + skill.content).lower()
-            if not q or any(token in hay for token in q.split()):
-                selected.append(skill)
+        selected = self.match(query, limit=5)
         if not selected:
             selected = skills[:3]
         return "\n\n".join(f"## {s.name}\n{s.content[:1500]}" for s in selected[:5])
@@ -70,6 +83,35 @@ class SkillStore:
         skills = self.list()
         evolved = sum(1 for s in skills if "source: self_evolution" in s.content or s.name.startswith("evolved_"))
         return {"total": len(skills), "evolved": evolved}
+
+    def _parse_frontmatter(self, content: str) -> tuple[dict[str, Any], str]:
+        if not content.startswith("---\n"):
+            return {}, content
+        end = content.find("\n---", 4)
+        if end < 0:
+            return {}, content
+        raw = content[4:end]
+        body = content[content.find("\n", end + 4) + 1 :]
+        metadata: dict[str, Any] = {}
+        for line in raw.splitlines():
+            if ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            value = value.strip()
+            if "," in value:
+                metadata[key.strip()] = [item.strip() for item in value.split(",") if item.strip()]
+            else:
+                metadata[key.strip()] = value
+        return metadata, body
+
+    def _metadata_list(self, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [str(item) for item in value]
+        if isinstance(value, tuple):
+            return [str(item) for item in value]
+        return [str(value)]
 
     def _with_frontmatter(self, safe_name: str, content: str, metadata: dict[str, Any]) -> str:
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())

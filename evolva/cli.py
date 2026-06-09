@@ -10,7 +10,7 @@ from evolva.agent.core import EvolvaAgent
 from evolva.agent.dream import DreamEngine
 from evolva.agent.evolution_analyzer import EvalEvolutionAnalyzer, TraceEvolutionAnalyzer, apply_proposals, render_analysis, render_reports
 from evolva.config import AgentConfig
-from evolva.eval.harness import EvalHarness, render_results
+from evolva.eval.harness import EvalHarness, render_gate, render_results
 from evolva.maintenance.optimizer import run_daily_optimization
 from evolva.tui import run_tui
 from evolva.workflow.engine import WorkflowEngine
@@ -337,7 +337,16 @@ def eval_cmd(args: argparse.Namespace) -> int:
     harness = EvalHarness(AgentConfig(), assume_yes=args.yes)
     results = harness.run_file(args.tasks)
     print(render_results(results))
-    return 0 if all(r.passed for r in results) else 1
+    gate = harness.gate(
+        results,
+        baseline_path=args.baseline,
+        min_score=args.min_score,
+        no_regression=args.no_regression,
+        name=args.tasks.stem,
+    )
+    if args.baseline or args.min_score is not None or args.no_regression:
+        print(render_gate(gate))
+    return 0 if gate.ok else 1
 
 
 def workflow_cmd(args: argparse.Namespace) -> int:
@@ -474,6 +483,9 @@ def build_parser() -> argparse.ArgumentParser:
     eval_p = sub.add_parser("eval", help="Automation: run jsonl eval tasks")
     eval_p.add_argument("tasks", type=lambda s: __import__("pathlib").Path(s))
     eval_p.add_argument("--yes", action="store_true", help="Approve shell/python tools during eval")
+    eval_p.add_argument("--baseline", type=lambda s: __import__("pathlib").Path(s), help="Compare against a checked-in eval baseline JSON")
+    eval_p.add_argument("--min-score", type=float, help="Require the average eval score to be at least this value")
+    eval_p.add_argument("--no-regression", action="store_true", help="Fail if any baseline task regresses")
     eval_p.set_defaults(func=eval_cmd)
 
     evolve_p = sub.add_parser("evolve", help="Automation: inspect or apply self-evolution proposals")

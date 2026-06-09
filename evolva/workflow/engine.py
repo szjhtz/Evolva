@@ -32,10 +32,15 @@ class WorkflowEngine:
         workflow_id = str(spec.get("id") or time.strftime("workflow_%Y%m%d_%H%M%S"))
         outputs: dict[str, Any] = {}
         logs: list[str] = []
-        nodes = spec.get("nodes", [])
-        for node in nodes:
-            node_id = str(node.get("id") or f"node_{len(outputs) + 1}")
+        try:
+            nodes = self._normalize_nodes(spec.get("nodes", []))
+            execution_order = self._topological_order(nodes)
+        except ValueError as exc:
+            return WorkflowResult(workflow_id, False, {}, [f"Workflow planning error: {exc}"])
+        for node_id in execution_order:
+            node = nodes[node_id]
             kind = node.get("type", "agent")
+            deps = node.get("depends_on", [])
             try:
                 if kind == "tool":
                     result = self._run_tool_node(node, outputs)
@@ -48,11 +53,65 @@ class WorkflowEngine:
             except Exception as exc:
                 result = ToolResult(False, f"Workflow node error: {exc}")
             outputs[node_id] = result.output
-            logs.append(f"[{node_id}/{kind}] ok={result.ok}\n{result.output}")
+            dep_text = ",".join(deps) if deps else "none"
+            logs.append(f"[{node_id}/{kind}] depends_on={dep_text} ok={result.ok}\n{result.output}")
             self.agent.context.add("artifact", f"Workflow {workflow_id} node {node_id} ok={result.ok}\n{result.output[:1000]}")
             if not result.ok and not node.get("continue_on_error", False):
                 return WorkflowResult(workflow_id, False, outputs, logs)
         return WorkflowResult(workflow_id, True, outputs, logs)
+
+    def _normalize_nodes(self, raw_nodes: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        """Normalize node IDs and dependencies while preserving sequential specs.
+
+        Existing workflows without `depends_on` keep their original sequential
+        semantics. Newer DAG specs can use explicit `depends_on` to run nodes in
+        dependency order even when they are declared out of order.
+        """
+        nodes: dict[str, dict[str, Any]] = {}
+        previous_id: str | None = None
+        for idx, raw in enumerate(raw_nodes):
+            node = dict(raw)
+            node_id = str(node.get("id") or f"node_{idx + 1}")
+            if node_id in nodes:
+                raise ValueError(f"duplicate workflow node id: {node_id}")
+            if "depends_on" in node:
+                deps_value = node.get("depends_on") or []
+                if isinstance(deps_value, str):
+                    deps = [deps_value]
+                else:
+                    deps = [str(item) for item in deps_value]
+            else:
+                deps = [previous_id] if previous_id else []
+            node["id"] = node_id
+            node["depends_on"] = deps
+            nodes[node_id] = node
+            previous_id = node_id
+        for node_id, node in nodes.items():
+            for dep in node.get("depends_on", []):
+                if dep not in nodes:
+                    raise ValueError(f"node {node_id} depends on missing node {dep}")
+        return nodes
+
+    def _topological_order(self, nodes: dict[str, dict[str, Any]]) -> list[str]:
+        order: list[str] = []
+        state: dict[str, str] = {}
+
+        def visit(node_id: str, stack: list[str]) -> None:
+            status = state.get(node_id)
+            if status == "done":
+                return
+            if status == "visiting":
+                cycle = " -> ".join(stack + [node_id])
+                raise ValueError(f"workflow dependency cycle: {cycle}")
+            state[node_id] = "visiting"
+            for dep in nodes[node_id].get("depends_on", []):
+                visit(dep, stack + [node_id])
+            state[node_id] = "done"
+            order.append(node_id)
+
+        for node_id in nodes:
+            visit(node_id, [])
+        return order
 
     def _run_tool_node(self, node: dict[str, Any], outputs: dict[str, Any]) -> ToolResult:
         name = str(node["tool"])
