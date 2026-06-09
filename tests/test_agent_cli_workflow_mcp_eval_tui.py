@@ -470,3 +470,20 @@ def test_tui_non_curses_command_completion_queue_and_confirmation(monkeypatch, t
     app2._handle_key(ord("y"))
     thread.join(timeout=1)
     assert result["answer"] is True
+
+
+def test_tui_status_bar_avoids_duplicate_ready(monkeypatch, temp_config):
+    monkeypatch.setattr("evolva.tui.AgentConfig", lambda: temp_config)
+    app = EvolvaTUI(assume_yes=True, show_tools=True)
+    captured = {}
+
+    class FakeScreen:
+        def addnstr(self, y, x, text, width, attr=None):
+            captured["text"] = text
+
+    app.stdscr = FakeScreen()
+    app._draw_status(0, 80)
+    status = captured["text"].strip()
+    assert status.startswith("READY")
+    assert "READY  Ready" not in status
+    assert "rule-mode" in status and "tools:on" in status

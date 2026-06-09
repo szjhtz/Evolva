@@ -621,7 +621,13 @@ class EvolvaTUI:
 
     def _draw_status(self, y: int, w: int) -> None:
         left = " BUSY " if self.busy else " READY "
-        status = f"{left} {self.status}"
+        if self.busy or self.status not in {"Ready", ""}:
+            detail = self.status
+        else:
+            model = self.agent.config.model if self.agent.llm.available else "rule-mode"
+            tools = "tools:on" if self.show_tools else "tools:off"
+            detail = f"{model} · {tools} · /help"
+        status = f"{left} {detail}"
         self.stdscr.addnstr(y, 0, status.ljust(w), w - 1, self._color(3, curses.A_REVERSE))
 
     def _draw_input(self, y: int, w: int) -> None:
