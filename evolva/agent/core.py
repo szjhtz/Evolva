@@ -96,9 +96,12 @@ class EvolvaAgent:
         self.context.add("decision", f"Switched model to {model}", role="system", meta={"model": model})
         return model
 
-    def _run_dream_tool(self, limit: int = 20, apply: bool = False) -> tuple[str, dict[str, Any]]:
+    def _run_dream_tool(self, limit: int = 20, apply: bool = False, verify: bool = False) -> tuple[str, dict[str, Any]]:
         """Tool adapter for running the Dream loop from evals or agent actions."""
         engine = DreamEngine(self)
+        if verify:
+            results = engine.verify_backlog(limit=limit)
+            return engine.render_verification(results), {"verification": [item.to_dict() for item in results]}
         report = engine.run(trace_limit=limit, apply=apply)
         return engine.render(report), report.to_dict()
 

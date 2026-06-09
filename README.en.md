@@ -90,7 +90,7 @@ Evolva is a composable, observable, and continuously improving Agent Harness. It
 | **Eval Harness** | JSONL tasks with text, regex, artifacts, memory, context, and tool-error checks | CI / Regression |
 | **Guardrails / Sandbox** | Path sandbox, dangerous command denylist, risk scoring, secret detection, approvals | `/policy` |
 | **Self-Evolution** | Turns feedback, trace patterns, and eval failures into memory and skills | `/evolve` / `/dream` |
-| **Dreaming** | Local background reflection: Evidence → Hypothesis → Critique → Action, with auditable reports and optional high-confidence promotion | `/dream` |
+| **Dreaming** | Local self-evolution research loop: Evidence → Hypothesis → Candidate → Verifier → Promotion, with auditable reports and an improvement backlog | `/dream` |
 
 ## Architecture
 
@@ -111,15 +111,17 @@ Evolva's evolution loop is a concrete state update pipeline:
 ```text
 Feedback / Trace Pattern / Eval Failure
         ↓
-Reflection
+Evidence
         ↓
-Dream Report
+Hypothesis
         ↓
-Long-term Memory
+Candidate + Verifier
         ↓
-Markdown Skill
+Dream Backlog
         ↓
-Future Prompt Context
+Staged Promotion
+        ↓
+Long-term Memory / Markdown Skill
 ```
 
 TUI examples:
@@ -131,12 +133,13 @@ TUI examples:
 /evolve apply-trace
 /evolve apply-eval
 /dream
+/dream backlog
 /dream apply --min-confidence 0.8
 ```
 
 The resulting lessons include **category / confidence / evidence / fingerprint**, are persisted in memory, and can be materialized as Markdown skills for future context injection. `evolve audit` summarizes lesson coverage, evolved skills, pending Trace/Eval proposals, and recommended next steps.
 
-`dream` is Evolva's local Dreaming loop. It scans recent traces, the latest eval report, and current Memory/Skill coverage, then runs **Evidence → Hypothesis → Critique → Action**: collect signals, generate falsifiable hypotheses, reject low-confidence/duplicate/weak-evidence items with deterministic drift guards, and write an auditable `evolva/dreams/*.json` report. With `--apply`, only high-confidence proposals pass through the Self-Evolution quality gate into Memory / Skill.
+`dream` is Evolva's local self-evolution research loop. It scans recent traces, the latest eval report, and current Memory/Skill coverage, then runs **Evidence → Hypothesis → Candidate → Verifier → Promotion**. Accepted hypotheses become `DreamCandidate` records with affected surfaces, risk, proposed change, and verifier metadata, then land in `evolva/dreams/backlog.json` as an improvement backlog. With `apply`, only high-confidence candidates pass through staged promotion into Memory / Skill, while `/dream verify` can run Eval or Trace verifiers for regression confirmation and advance passing candidates to verified/promoted.
 
 ## TUI Workbench
 
@@ -160,7 +163,9 @@ Common TUI flows:
 /trace context latest                 Inspect latest context/prompt events
 /workflow <json>                      Run a workflow spec
 /evolve audit                         Inspect self-evolution coverage
-/dream --min-confidence 0.8           Run Dreaming drift-guard analysis
+/dream --min-confidence 0.8           Run Dreaming quality-gate analysis
+/dream backlog                        Show staged Dream improvement candidates
+/dream verify                         Run candidate verifiers
 ```
 
 <details>
@@ -191,7 +196,9 @@ Common TUI flows:
 /mcp tools [server]       List MCP tools
 /image <path|url> [text]  Ask with an image
 /evolve [feedback]        Turn feedback into memory + skill
-/dream                    Run an offline Dreaming reflection report
+/dream                    Run a Dreaming quality-gate report
+/dream backlog            Show staged Dream improvement candidates
+/dream verify             Run candidate verifiers
 /dream --min-confidence n  Tune the drift-guard confidence threshold
 /dream apply              Apply high-confidence Dreaming proposals
 /workflow <json>          Run a workflow spec

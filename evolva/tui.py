@@ -31,7 +31,7 @@ TUI keys:
   /exit          Quit
 
 Commands:
-  /help, /tools, /skills, /memory [query|stats|recent n], /context [query], /todo, /agents, /trace [list|show|context], /model [name], /policy, /mcp [add|remove|tools], /image <path|url> [text], /evolve [feedback|status|audit|trace|apply-trace|eval|apply-eval], /dream [apply|--min-confidence n], /run <tool> <json>
+  /help, /tools, /skills, /memory [query|stats|recent n], /context [query], /todo, /agents, /trace [list|show|context], /model [name], /policy, /mcp [add|remove|tools], /image <path|url> [text], /evolve [feedback|status|audit|trace|apply-trace|eval|apply-eval], /dream [backlog|verify|apply|--min-confidence n], /run <tool> <json>
 """.strip()
 
 
@@ -375,6 +375,21 @@ class EvolvaTUI:
             elif line.startswith("/dream"):
                 rest = line.removeprefix("/dream").strip()
                 parts = shlex.split(rest) if rest else []
+                engine = DreamEngine(self.agent)
+                if parts and parts[0] in {"backlog", "candidates", "status"}:
+                    self._add_system(engine.render_backlog())
+                    return
+                if parts and parts[0] == "verify":
+                    limit = 20
+                    tasks_path = None
+                    promote = "--promote" in parts
+                    for idx, part in enumerate(parts):
+                        if part in {"--limit", "-n"} and idx + 1 < len(parts):
+                            limit = int(parts[idx + 1])
+                        elif part in {"--tasks", "--eval"} and idx + 1 < len(parts):
+                            tasks_path = self.agent.sandbox.resolve(parts[idx + 1])
+                    self._add_system(engine.render_verification(engine.verify_backlog(tasks_path=tasks_path, limit=limit, promote=promote)))
+                    return
                 apply = bool(parts and parts[0] in {"apply", "--apply"})
                 limit = 20
                 report_path = None
@@ -386,7 +401,6 @@ class EvolvaTUI:
                         report_path = self.agent.sandbox.resolve(parts[idx + 1])
                     elif part in {"--min-confidence", "--threshold"} and idx + 1 < len(parts):
                         min_confidence = float(parts[idx + 1])
-                engine = DreamEngine(self.agent)
                 dream_report = engine.run(trace_limit=limit, eval_report=report_path, apply=apply, min_confidence=min_confidence)
                 self._add_system(engine.render(dream_report))
             elif line.startswith("/run"):

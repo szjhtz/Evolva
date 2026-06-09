@@ -52,6 +52,8 @@ Commands:
   /evolve apply-eval [json]
                        Analyze eval failures and apply proposals
   /dream               Run offline trace/eval/memory reflection
+  /dream backlog       Show staged Dream improvement candidates
+  /dream verify        Run candidate verifiers against local eval/trace evidence
   /dream apply         Apply high-confidence dream proposals
   /dream --min-confidence 0.8
                        Raise the Dreaming drift-guard threshold
@@ -214,6 +216,21 @@ def handle_command(agent: EvolvaAgent, line: str) -> bool:
     if line.startswith("/dream"):
         rest = line.removeprefix("/dream").strip()
         parts = shlex.split(rest) if rest else []
+        engine = DreamEngine(agent)
+        if parts and parts[0] in {"backlog", "candidates", "status"}:
+            print(engine.render_backlog())
+            return True
+        if parts and parts[0] == "verify":
+            limit = 20
+            tasks_path = None
+            promote = "--promote" in parts
+            for idx, part in enumerate(parts):
+                if part in {"--limit", "-n"} and idx + 1 < len(parts):
+                    limit = int(parts[idx + 1])
+                elif part in {"--tasks", "--eval"} and idx + 1 < len(parts):
+                    tasks_path = agent.sandbox.resolve(parts[idx + 1])
+            print(engine.render_verification(engine.verify_backlog(tasks_path=tasks_path, limit=limit, promote=promote)))
+            return True
         apply = bool(parts and parts[0] in {"apply", "--apply"})
         limit = 20
         report_path = None
@@ -225,7 +242,6 @@ def handle_command(agent: EvolvaAgent, line: str) -> bool:
                 report_path = agent.sandbox.resolve(parts[idx + 1])
             elif part in {"--min-confidence", "--threshold"} and idx + 1 < len(parts):
                 min_confidence = float(parts[idx + 1])
-        engine = DreamEngine(agent)
         report = engine.run(trace_limit=limit, eval_report=report_path, apply=apply, min_confidence=min_confidence)
         print(engine.render(report))
         return True
@@ -404,8 +420,18 @@ def optimize_cmd(args: argparse.Namespace) -> int:
 
 def dream_cmd(args: argparse.Namespace) -> int:
     agent = EvolvaAgent(AgentConfig(), assume_yes=True)
-    report_path = args.report
     engine = DreamEngine(agent)
+    if getattr(args, "dream_cmd", None) == "backlog":
+        print(engine.render_backlog(limit=args.limit))
+        return 0
+    if getattr(args, "dream_cmd", None) == "verify":
+        results = engine.verify_backlog(tasks_path=args.tasks, limit=args.limit, promote=args.promote)
+        if args.json:
+            print(json.dumps([item.to_dict() for item in results], ensure_ascii=False, indent=2))
+        else:
+            print(engine.render_verification(results))
+        return 0 if all(item.ok for item in results) else 1
+    report_path = args.report
     report = engine.run(trace_limit=args.limit, eval_report=report_path, apply=args.apply, min_confidence=args.min_confidence)
     if args.json:
         print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
@@ -477,7 +503,17 @@ def build_parser() -> argparse.ArgumentParser:
     optimize_p.set_defaults(func=optimize_cmd)
 
     dream_p = sub.add_parser("dream", help="Automation: run Evolva's local trace/eval/memory reflection loop")
-    dream_p.add_argument("--apply", action="store_true", help="Apply high-confidence proposals as Memory/Skill lessons")
+    dream_sub = dream_p.add_subparsers(dest="dream_cmd", required=False)
+    dream_backlog = dream_sub.add_parser("backlog", help="Show staged Dream improvement candidates")
+    dream_backlog.add_argument("--limit", type=int, default=20, help="Candidate limit")
+    dream_backlog.set_defaults(func=dream_cmd)
+    dream_verify = dream_sub.add_parser("verify", help="Run candidate verifiers against local eval/trace evidence")
+    dream_verify.add_argument("--tasks", type=lambda s: __import__("pathlib").Path(s), help="JSONL eval task file for eval verifiers")
+    dream_verify.add_argument("--limit", type=int, default=20, help="Candidate and trace limit")
+    dream_verify.add_argument("--promote", action="store_true", help="Promote verified candidates in the Dream backlog")
+    dream_verify.add_argument("--json", action="store_true", help="Print verifier results as JSON")
+    dream_verify.set_defaults(func=dream_cmd)
+    dream_p.add_argument("--apply", action="store_true", help="Stage high-confidence proposals through Memory/Skill with verifiers recorded")
     dream_p.add_argument("--limit", type=int, default=20, help="Recent trace run limit")
     dream_p.add_argument("--report", type=lambda s: __import__("pathlib").Path(s), help="Eval report JSON; defaults to latest")
     dream_p.add_argument("--min-confidence", type=float, default=None, help="Minimum confidence for automatic Dreaming promotion")
