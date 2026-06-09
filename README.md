@@ -78,7 +78,6 @@ evolva
 保留少量脚本化入口用于 CI、自动化和一次性任务：
 
 ```bash
-evolva ask "分析当前仓库并给出可验证的优化计划"
 evolva eval evals/tasks/smoke.jsonl --yes
 evolva dream --json
 ```
@@ -182,7 +181,6 @@ TUI 内常用路径：
 脚本化/CI 入口仅用于自动化与回归基线：
 
 ```bash
-evolva ask "分析当前仓库并给出可验证的优化计划"
 evolva eval evals/tasks/smoke.jsonl --yes
 evolva dream --json
 ```

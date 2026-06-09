@@ -66,7 +66,6 @@ Inside the TUI, use Slash Commands:
 A small set of scriptable commands remains available for CI and automation:
 
 ```bash
-evolva ask "Analyze this repository and produce a verifiable improvement plan"
 evolva eval evals/tasks/smoke.jsonl --yes
 evolva dream --json
 ```
@@ -178,7 +177,6 @@ Common TUI flows:
 Scriptable/CI entries are kept for automation and regression baselines:
 
 ```bash
-evolva ask "Analyze this repository and produce a verifiable improvement plan"
 evolva eval evals/tasks/smoke.jsonl --yes
 evolva dream --json
 ```
