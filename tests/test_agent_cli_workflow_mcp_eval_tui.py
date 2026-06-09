@@ -448,6 +448,10 @@ def test_tui_non_curses_command_completion_queue_and_confirmation(monkeypatch, t
     assert any(run_id in m.text for m in app.messages)
     app._handle_key(24)
     assert any("Trace context" in m.text for m in app.messages)
+    app.input_text = ""
+    app._handle_key("你")
+    app._handle_key("好")
+    assert app.input_text == "你好"
     app.queue.put(("tool_result", ("sandbox_info", True, "ok")))
     app.queue.put(("system", "system msg"))
     app.queue.put(("error", "bad"))

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import curses
 import json
+import locale
 import os
 import shlex
 import textwrap
@@ -75,6 +76,10 @@ class EvolvaTUI:
         self.stdscr: Any = None
 
     def run(self) -> int:
+        try:
+            locale.setlocale(locale.LC_ALL, "")
+        except locale.Error:
+            pass
         return curses.wrapper(self._main)
 
     def _main(self, stdscr: Any) -> int:
@@ -91,11 +96,20 @@ class EvolvaTUI:
         while True:
             self._drain_queue()
             self._draw()
-            ch = stdscr.getch()
-            if ch == -1:
+            ch = self._read_key(stdscr)
+            if ch is None:
                 continue
             if self._handle_key(ch) is False:
                 return 0
+
+    def _read_key(self, stdscr: Any) -> int | str | None:
+        try:
+            ch = stdscr.get_wch()
+        except curses.error:
+            return None
+        if ch == -1:
+            return None
+        return ch
 
     def _init_colors(self) -> None:
         try:
@@ -141,25 +155,26 @@ class EvolvaTUI:
         self.confirmation_answer = None
         return answer
 
-    def _handle_key(self, ch: int) -> bool | None:
+    def _handle_key(self, ch: int | str) -> bool | None:
+        text = self._key_text(ch)
         if self.confirmation_event is not None:
-            if ch in (ord("y"), ord("Y")):
+            if text in ("y", "Y"):
                 self.confirmation_answer = True
                 self.status = "Tool approved."
                 self.confirmation_event.set()
-            elif ch in (ord("n"), ord("N"), 27, curses.KEY_ENTER, 10, 13):
+            elif text in ("n", "N", "\x1b", "\n", "\r") or self._is_key(ch, curses.KEY_ENTER):
                 self.confirmation_answer = False
                 self.status = "Tool denied."
                 self.confirmation_event.set()
             return None
         if self.busy:
-            if ch in (curses.KEY_PPAGE,):
+            if self._is_key(ch, curses.KEY_PPAGE):
                 self.scroll += 3
-            elif ch in (curses.KEY_NPAGE,):
+            elif self._is_key(ch, curses.KEY_NPAGE):
                 self.scroll = max(0, self.scroll - 3)
             return None
 
-        if ch in (10, 13, curses.KEY_ENTER):
+        if text in ("\n", "\r") or self._is_key(ch, curses.KEY_ENTER):
             line = self.input_text.strip()
             self.input_text = ""
             self.history_index = None
@@ -170,42 +185,40 @@ class EvolvaTUI:
                 return False
             self._submit(line)
             return None
-        if ch == 12:  # Ctrl+L
+        if text == "\x0c":  # Ctrl+L
             self.messages.clear()
             self.tool_logs.clear()
             self.scroll = 0
             self.status = "Cleared."
             return None
-        if ch == 20:  # Ctrl+T
+        if text == "\x14":  # Ctrl+T
             self.show_tools = not self.show_tools
             self.status = "Tool panel " + ("on" if self.show_tools else "off")
             return None
-        if ch == 18:  # Ctrl+R
+        if text == "\x12":  # Ctrl+R
             self._show_recent_traces()
             return None
-        if ch == 24:  # Ctrl+X
+        if text == "\x18":  # Ctrl+X
             self._show_latest_trace_context()
             return None
-        if ch == curses.KEY_F2:
+        if self._is_key(ch, curses.KEY_F2):
             self.input_text = "/model "
             self.status = "Type a model name, then Enter. Use /model to view current model."
             return None
-        if ch == 10:  # unreachable due Enter branch, kept for clarity
-            return None
-        if ch == 27:  # Esc
+        if text == "\x1b":  # Esc
             self.input_text = ""
             self.status = "Input cleared."
             return None
-        if ch in (curses.KEY_BACKSPACE, 127, 8):
+        if text in ("\b", "\x7f") or self._is_key(ch, curses.KEY_BACKSPACE):
             self.input_text = self.input_text[:-1]
             return None
-        if ch == curses.KEY_PPAGE:
+        if self._is_key(ch, curses.KEY_PPAGE):
             self.scroll += 5
             return None
-        if ch == curses.KEY_NPAGE:
+        if self._is_key(ch, curses.KEY_NPAGE):
             self.scroll = max(0, self.scroll - 5)
             return None
-        if ch == curses.KEY_UP:
+        if self._is_key(ch, curses.KEY_UP):
             if self.history:
                 if self.history_index is None:
                     self.history_index = len(self.history) - 1
@@ -213,7 +226,7 @@ class EvolvaTUI:
                     self.history_index = max(0, self.history_index - 1)
                 self.input_text = self.history[self.history_index]
             return None
-        if ch == curses.KEY_DOWN:
+        if self._is_key(ch, curses.KEY_DOWN):
             if self.history_index is not None:
                 self.history_index += 1
                 if self.history_index >= len(self.history):
@@ -222,15 +235,23 @@ class EvolvaTUI:
                 else:
                     self.input_text = self.history[self.history_index]
             return None
-        if ch == 9:  # Tab quick complete common slash commands
+        if text == "\t":  # Tab quick complete common slash commands
             self._complete_command()
             return None
-        if 32 <= ch <= 0x10FFFF:
-            try:
-                self.input_text += chr(ch)
-            except ValueError:
-                pass
+        if text and text.isprintable():
+            self.input_text += text
         return None
+
+    def _key_text(self, ch: int | str) -> str:
+        if isinstance(ch, str):
+            return ch
+        try:
+            return chr(ch)
+        except (TypeError, ValueError):
+            return ""
+
+    def _is_key(self, ch: int | str, *keys: int) -> bool:
+        return isinstance(ch, int) and ch in keys
 
     def _complete_command(self) -> None:
         commands = ["/help", "/tools", "/skills", "/memory", "/context", "/todo", "/agents", "/trace", "/model", "/policy", "/repo", "/mcp", "/image", "/evolve", "/dream", "/run", "/exit"]
