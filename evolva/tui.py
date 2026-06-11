@@ -25,14 +25,16 @@ try:  # Textual is the preferred production TUI renderer when installed.
     from textual.app import App, ComposeResult
     from textual.binding import Binding
     from textual.containers import Container, Horizontal, Vertical
-    from textual.widgets import Footer, Header, Input, RichLog, Static
+    from textual.message import Message
+    from textual.widgets import Footer, Header, RichLog, Static
 
     TEXTUAL_AVAILABLE = True
 except Exception:  # pragma: no cover - exercised through fallback tests.
     App = object  # type: ignore[assignment]
     ComposeResult = Any  # type: ignore[misc,assignment]
     Binding = None  # type: ignore[assignment]
-    Container = Horizontal = Vertical = Footer = Header = Input = RichLog = Static = None  # type: ignore[assignment]
+    Message = object  # type: ignore[assignment]
+    Container = Horizontal = Vertical = Footer = Header = RichLog = Static = None  # type: ignore[assignment]
     TEXTUAL_AVAILABLE = False
 
 
@@ -934,22 +936,27 @@ class EvolvaTUI:
 
 if TEXTUAL_AVAILABLE:
 
-    class EvolvaInput(Input):  # type: ignore[misc]
-        """Input widget tuned for Chinese IME input in common macOS terminals.
+    class EvolvaInput(Static):  # type: ignore[misc]
+        """Small self-rendered command line with robust CJK/IME display.
 
-        Textual's stock input works for regular Unicode key events, but some
-        terminals send IME commits as multi-character printable key payloads.
-        This widget normalizes that path and forces a visible foreground/cursor
-        style so CJK text does not disappear into the gold focused border.
+        Some terminals used with Textual's stock ``Input`` accept Chinese IME
+        commits but fail to render the committed text in the input field. Evolva
+        keeps the Textual layout while owning the final input rendering here:
+        all printable key events are appended to a plain Python string and the
+        visible line is re-rendered as Static content. This makes Chinese text
+        display deterministic in macOS Terminal/iTerm style environments.
         """
 
+        can_focus = True
+
         DEFAULT_CSS = (
-            Input.DEFAULT_CSS
-            + """
+            """
             EvolvaInput {
                 color: #F3E8D0;
                 background: #0C0B09;
                 border: round #D9B762;
+                height: 3;
+                width: 100%;
                 padding: 0 2;
             }
             EvolvaInput:focus {
@@ -957,43 +964,74 @@ if TEXTUAL_AVAILABLE:
                 background: #0C0B09;
                 border: round #F2C96B;
             }
-            EvolvaInput > .input--cursor {
-                background: #F2C96B;
-                color: #050402;
-                text-style: none;
-            }
-            EvolvaInput > .input--placeholder,
-            EvolvaInput > .input--suggestion {
-                color: #7F776A;
-            }
             """
         )
+
+        class Submitted(Message):  # type: ignore[misc]
+            """Posted when the user presses Enter in EvolvaInput."""
+
+            def __init__(self, input_widget: "EvolvaInput", value: str):
+                super().__init__()
+                self.input = input_widget
+                self.value = value
+
+        def __init__(self, placeholder: str = "", **kwargs: Any):
+            super().__init__("", **kwargs)
+            self.placeholder = placeholder
+            self.value = ""
+            self.cursor_visible = True
+
+        def on_mount(self) -> None:
+            self._render_value()
+
+        def watch_has_focus(self, has_focus: bool) -> None:
+            self._render_value()
 
         async def _on_key(self, event: Any) -> None:
             character = getattr(event, "character", None)
             key = getattr(event, "key", "")
-            if character and character.isprintable() and (len(character) > 1 or any(ord(ch) > 127 for ch in character)):
+            if key in {"enter", "ctrl+j"} or character in {"\n", "\r"}:
                 event.stop()
-                self._insert_printable_text(character)
                 event.prevent_default()
-                self.refresh()
+                value = self.value
+                self.value = ""
+                self._render_value()
+                self.post_message(self.Submitted(self, value))
                 return
-            if key and len(key) == 1 and ord(key) > 127 and key.isprintable():
+            if key in {"backspace", "ctrl+h"} or character in {"\b", "\x7f"}:
                 event.stop()
-                self._insert_printable_text(key)
                 event.prevent_default()
-                self.refresh()
+                self.value = self.value[:-1]
+                self._render_value()
                 return
-            await super()._on_key(event)
+            if key == "escape":
+                event.stop()
+                event.prevent_default()
+                self.value = ""
+                self._render_value()
+                return
+            text = character if character and character.isprintable() else key if len(key) == 1 and key.isprintable() else ""
+            if text:
+                event.stop()
+                event.prevent_default()
+                self.value += text
+                self._render_value()
 
-        def _insert_printable_text(self, text: str) -> None:
-            """Insert printable committed IME text while preserving selection semantics."""
+        def set_value(self, value: str) -> None:
+            """Set the visible command value."""
 
-            selection = self.selection
-            if selection.is_empty:
-                self.insert_text_at_cursor(text)
+            self.value = value
+            self._render_value()
+
+        def _render_value(self) -> None:
+            if self.value:
+                safe_value = self.value.replace("[", "\\[")
+                content = f"[bold #FFF5DB]You ›[/] {safe_value}[#F2C96B]▌[/]"
+            elif self.has_focus:
+                content = f"[dim]{self.placeholder}[/] [#F2C96B]▌[/]"
             else:
-                self.replace(text, *selection)
+                content = f"[dim]{self.placeholder}[/]"
+            self.update(content, layout=False)
 
     class EvolvaTextualApp(App):  # type: ignore[misc]
         """Textual-powered Evolva workbench.
@@ -1099,9 +1137,8 @@ if TEXTUAL_AVAILABLE:
             self.set_interval(0.1, self._drain_runtime_queue)
             self._refresh_status()
 
-        def on_input_submitted(self, event: Input.Submitted) -> None:
+        def on_evolva_input_submitted(self, event: EvolvaInput.Submitted) -> None:
             line = event.value.strip()
-            event.input.value = ""
             if not line:
                 return
             if line in {"/exit", "/quit"}:
@@ -1124,11 +1161,11 @@ if TEXTUAL_AVAILABLE:
             thread.start()
 
         def action_model(self) -> None:
-            self.query_one("#input", EvolvaInput).value = "/model "
+            self.query_one("#input", EvolvaInput).set_value("/model ")
             self.query_one("#input", EvolvaInput).focus()
 
         def action_config(self) -> None:
-            self.query_one("#input", EvolvaInput).value = "/config "
+            self.query_one("#input", EvolvaInput).set_value("/config ")
             self.query_one("#input", EvolvaInput).focus()
 
         def action_traces(self) -> None:

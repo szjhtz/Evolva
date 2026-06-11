@@ -670,13 +670,14 @@ def test_textual_input_accepts_chinese_key_events():
             self.prevented = True
 
     event = FakeEvent()
-    captured = []
-    app._insert_printable_text = captured.append
-    app.refresh = lambda *args, **kwargs: None
+    rendered = []
+    app.has_focus = True
+    app.update = lambda content, layout=False: rendered.append(content)
     import asyncio
 
     asyncio.run(app._on_key(event))
-    assert captured == ["你"]
+    assert app.value == "你"
+    assert "你" in rendered[-1]
     assert event.stopped and event.prevented
 
 def test_inline_tui_ctrl_c_requires_second_interrupt(monkeypatch, capsys, temp_config):
