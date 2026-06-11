@@ -197,6 +197,10 @@ TUI 内示例：
 
 Evolva 的日常使用围绕 TUI Workbench 展开：对话、工具调用、MCP 接入、Trace 检索、模型切换、Loop/Workflow 编排和自我进化都收敛在同一套 Slash Commands 中。
 
+<p align="center">
+  <img src="assets/tui-mockup.svg" alt="Evolva TUI Workbench preview" width="100%" />
+</p>
+
 ```bash
 evolva
 ```
@@ -312,11 +316,7 @@ Evolva 的目标不是把所有业务场景包装成一个“万能 Agent 分数
 
 这个项目更适合作为本地 Agent Infra 的开放工程底座：业务侧的评测数据、领域 scorer、私有工具和安全策略可以在这套 harness 上组合，而不是被一个固定 demo 流程锁死。
 
-## TUI 工作台预览
-
-<p align="center">
-  <img src="assets/tui-mockup.svg" alt="Evolva TUI mockup" width="100%" />
-</p>
+## TUI 快捷键
 
 TUI 支持常见工作台快捷键：
 
