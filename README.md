@@ -196,6 +196,7 @@ TUI 内示例：
 ## TUI 工作台入口
 
 Evolva 的日常使用围绕 TUI Workbench 展开：对话、工具调用、MCP 接入、Trace 检索、模型切换、Loop/Workflow 编排和自我进化都收敛在同一套 Slash Commands 中。
+默认界面基于 **Textual** 渲染，提供持久对话区、Trace / Tool Stream 侧栏、状态栏和快捷键；依赖缺失时会自动回退到轻量 inline 模式。
 
 <p align="center">
   <img src="assets/tui-mockup.svg" alt="Evolva TUI Workbench preview" width="100%" />

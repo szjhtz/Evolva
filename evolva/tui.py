@@ -21,6 +21,21 @@ from evolva.config import AgentConfig, mask_secret, remove_runtime_config_keys, 
 from evolva.loops import LoopRunner, render_loop_result, render_loop_specs
 
 
+try:  # Textual is the preferred production TUI renderer when installed.
+    from textual.app import App, ComposeResult
+    from textual.binding import Binding
+    from textual.containers import Container, Horizontal, Vertical
+    from textual.widgets import Footer, Header, Input, RichLog, Static
+
+    TEXTUAL_AVAILABLE = True
+except Exception:  # pragma: no cover - exercised through fallback tests.
+    App = object  # type: ignore[assignment]
+    ComposeResult = Any  # type: ignore[misc,assignment]
+    Binding = None  # type: ignore[assignment]
+    Container = Horizontal = Vertical = Footer = Header = Input = RichLog = Static = None  # type: ignore[assignment]
+    TEXTUAL_AVAILABLE = False
+
+
 TUI_HELP = """
 TUI keys:
   Enter          Send message or command
@@ -917,10 +932,237 @@ class EvolvaTUI:
         return max(0, len(text) // 4)
 
 
-def run_tui(assume_yes: bool = False, show_tools: bool = True) -> int:
-    """Run Evolva's default inline TUI without taking over the full terminal."""
+if TEXTUAL_AVAILABLE:
 
-    return EvolvaInlineTUI(assume_yes=assume_yes, show_tools=show_tools).run()
+    class EvolvaTextualApp(App):  # type: ignore[misc]
+        """Textual-powered Evolva workbench.
+
+        The app reuses the same EvolvaTUI command/runtime layer while replacing
+        ad-hoc terminal printing with a proper panel layout and key bindings.
+        """
+
+        CSS = """
+        Screen {
+            background: #050402;
+            color: #E8E0D0;
+        }
+        #shell {
+            height: 100%;
+            padding: 1 2;
+        }
+        #brand {
+            height: 8;
+            border: round #D9B762;
+            padding: 0 2;
+            background: #0C0B09;
+            color: #D9B762;
+        }
+        #main {
+            height: 1fr;
+            margin-top: 1;
+        }
+        #chat_panel {
+            width: 2fr;
+            border: round #3A2A10;
+            background: #0A0A09;
+        }
+        #tool_panel {
+            width: 1fr;
+            border: round #3A2A10;
+            background: #0A0A09;
+            margin-left: 2;
+        }
+        #tool_panel.hidden {
+            display: none;
+        }
+        .panel_title {
+            color: #D9B762;
+            text-style: bold;
+            padding: 0 1;
+        }
+        RichLog {
+            padding: 0 1;
+            scrollbar-color: #D9B762;
+            scrollbar-background: #11100D;
+        }
+        #status {
+            height: 1;
+            color: #A7A096;
+            margin-top: 1;
+        }
+        #input {
+            margin-top: 1;
+            border: round #D9B762;
+            background: #0C0B09;
+        }
+        """
+
+        BINDINGS = [
+            Binding("ctrl+c", "quit", "Quit"),
+            Binding("f2", "model", "Model"),
+            Binding("f4", "config", "Config"),
+            Binding("ctrl+r", "traces", "Traces"),
+            Binding("ctrl+x", "context", "Context"),
+            Binding("ctrl+t", "toggle_tools", "Tools"),
+        ]
+
+        def __init__(self, assume_yes: bool = False, show_tools: bool = True):
+            super().__init__()
+            self.runtime = EvolvaTUI(assume_yes=assume_yes, show_tools=show_tools)
+            self.show_tools = show_tools
+            self._printed_messages = 0
+
+        def compose(self) -> ComposeResult:
+            with Container(id="shell"):
+                yield Header(show_clock=True)
+                yield Static(self._brand_text(), id="brand")
+                with Horizontal(id="main"):
+                    with Vertical(id="chat_panel"):
+                        yield Static("Conversation", classes="panel_title")
+                        yield RichLog(id="chat", wrap=True, highlight=True, markup=True)
+                    with Vertical(id="tool_panel", classes="" if self.show_tools else "hidden"):
+                        yield Static("Trace / Tool Stream", classes="panel_title")
+                        yield RichLog(id="tools", wrap=True, highlight=True, markup=True)
+                yield Static("", id="status")
+                yield Input(placeholder="You › ask Evolva, or type /help", id="input")
+                yield Footer()
+
+        def on_mount(self) -> None:
+            self.title = "Evolva"
+            self.sub_title = "Agent Workbench"
+            self.query_one("#input", Input).focus()
+            self._write_chat("[dim]Evolva is ready. Use /config wizard, /repo build, /dream, /loop, /trace, or /help.[/]")
+            if not self.runtime.agent.llm.available:
+                self._write_chat("[dim]local mode · configure a provider with /config wizard or F4.[/]")
+            self.set_interval(0.1, self._drain_runtime_queue)
+            self._refresh_status()
+
+        def on_input_submitted(self, event: Input.Submitted) -> None:
+            line = event.value.strip()
+            event.input.value = ""
+            if not line:
+                return
+            if line in {"/exit", "/quit"}:
+                self.exit()
+                return
+            self._write_chat(f"[bold white]You ›[/] {line}")
+            if line == "/config wizard":
+                self._write_chat("[yellow]Use /config set model|base_url|api_key|temperature <value> in Textual mode.[/]")
+                return
+            if line.startswith("/"):
+                self.runtime._handle_command(line)
+                self._drain_runtime_queue()
+                self._flush_runtime_messages()
+                self._refresh_status()
+                return
+            self.runtime.busy = True
+            self.runtime.status = "thinking"
+            self._refresh_status()
+            thread = threading.Thread(target=self.runtime._worker_chat, args=(line,), daemon=True)
+            thread.start()
+
+        def action_model(self) -> None:
+            self.query_one("#input", Input).value = "/model "
+            self.query_one("#input", Input).focus()
+
+        def action_config(self) -> None:
+            self.query_one("#input", Input).value = "/config "
+            self.query_one("#input", Input).focus()
+
+        def action_traces(self) -> None:
+            self.runtime._show_recent_traces()
+            self._flush_runtime_messages()
+
+        def action_context(self) -> None:
+            self.runtime._show_latest_trace_context()
+            self._flush_runtime_messages()
+
+        def action_toggle_tools(self) -> None:
+            self.show_tools = not self.show_tools
+            self.runtime.show_tools = self.show_tools
+            panel = self.query_one("#tool_panel")
+            panel.set_class(not self.show_tools, "hidden")
+            self._refresh_status()
+
+        def _brand_text(self) -> str:
+            version = self.runtime._project_version()
+            provider = self.runtime._provider_label()
+            model = self.runtime._model_label()
+            subtitle = f"{provider}_{model}" if provider != "local rule-mode" else "local_rule-mode"
+            cwd = self.runtime._path_label(92)
+            return "\n".join(
+                [
+                    "╭───────●   E V O L A  Agent Workbench  v" + version,
+                    "│  ╭───●   " + subtitle,
+                    "│  ╰───●   " + cwd,
+                    "●──╮       Trace · Eval · Dream · Loop · MCP · Memory · Guardrails",
+                    "│  ╰───●   /model  /mcp  /trace context latest  /loop run dream-loop",
+                    "╰───────●   F2 model · F4 config · Ctrl+R trace · Ctrl+X context",
+                ]
+            )
+
+        def _drain_runtime_queue(self) -> None:
+            self.runtime._drain_queue()
+            if self.runtime.tool_logs:
+                tool_log = self.runtime.tool_logs[-1]
+                tools = self.query_one("#tools", RichLog)
+                if not getattr(self, "_last_tool_log", None) == tool_log:
+                    tools.write(tool_log)
+                    self._last_tool_log = tool_log
+            self._flush_runtime_messages()
+            self._refresh_status()
+
+        def _flush_runtime_messages(self) -> None:
+            for msg in self.runtime.messages[self._printed_messages :]:
+                if msg.role == "You":
+                    continue
+                if msg.role == "Agent":
+                    self._write_chat(f"[bold #D9B762]Evolva[/]\n{msg.text}")
+                elif msg.role == "Error":
+                    self._write_chat(f"[bold red]Error[/]\n{msg.text}")
+                else:
+                    self._write_chat(f"[dim]System[/]\n{msg.text}")
+            self._printed_messages = len(self.runtime.messages)
+
+        def _write_chat(self, text: str) -> None:
+            self.query_one("#chat", RichLog).write(text)
+
+        def _refresh_status(self) -> None:
+            state = "THINKING" if self.runtime.busy else "READY"
+            if self.runtime.status and self.runtime.status not in {"Ready", "ready", ""}:
+                state = self.runtime.status
+            status = f"{state} · {self.runtime._provider_label()} · {self.runtime._model_label()} · tools:{'on' if self.show_tools else 'off'} · {self.runtime._token_estimate()} tokens"
+            self.query_one("#status", Static).update(status)
+
+else:
+
+    class EvolvaTextualApp:  # pragma: no cover - fallback placeholder.
+        """Placeholder used when Textual is not installed."""
+
+        def __init__(self, *_args: Any, **_kwargs: Any):
+            raise RuntimeError("Textual is not installed")
+
+
+def run_tui(assume_yes: bool = False, show_tools: bool = True) -> int:
+    """Run Evolva's default Textual workbench, falling back to inline mode if unavailable."""
+
+    return run_textual_tui(assume_yes=assume_yes, show_tools=show_tools)
+
+
+def run_textual_tui(assume_yes: bool = False, show_tools: bool = True) -> int:
+    """Run the Textual-powered Evolva workbench.
+
+    Textual gives Evolva a real app layout: persistent chat, tool stream,
+    status/header/footer regions, key bindings, and live refresh. If the
+    optional dependency is missing, Evolva keeps working via the inline TUI.
+    """
+
+    if not TEXTUAL_AVAILABLE:
+        print("Textual is not installed; falling back to the inline TUI. Install with `pip install -e .`.")
+        return EvolvaInlineTUI(assume_yes=assume_yes, show_tools=show_tools).run()
+    app = EvolvaTextualApp(assume_yes=assume_yes, show_tools=show_tools)
+    app.run()
+    return 0
 
 
 def run_fullscreen_tui(assume_yes: bool = False, show_tools: bool = True) -> int:

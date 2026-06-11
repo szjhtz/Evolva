@@ -14,6 +14,7 @@ from evolva.agent.tracing import TraceRecorder
 from evolva.cli import build_parser, dream_cmd, evolve_cmd, handle_command, loop_cmd, main, mcp_cmd, once, optimize_cmd
 from evolva.eval.harness import EvalHarness, EvalResult, render_gate, render_results
 from evolva.eval.scorers import ScoreCheck, ScorerRegistry
+import evolva.tui as tui_module
 from evolva.tui import EvolvaInlineTUI, EvolvaTUI, TUIConfirmation
 from evolva.workflow.engine import WorkflowEngine
 
@@ -611,6 +612,43 @@ def test_inline_tui_renders_workbench_panels(monkeypatch, capsys, temp_config):
     assert "Trace · Eval · Dream · Loop" in out
     assert "╭─ Evolva" in out
     assert "Trace / Tool Stream" in out
+
+
+def test_run_tui_delegates_to_textual_workbench(monkeypatch):
+    called = {}
+
+    def fake_textual(assume_yes=False, show_tools=True):
+        called["args"] = (assume_yes, show_tools)
+        return 17
+
+    monkeypatch.setattr(tui_module, "run_textual_tui", fake_textual)
+    assert tui_module.run_tui(assume_yes=True, show_tools=False) == 17
+    assert called["args"] == (True, False)
+
+
+def test_textual_tui_falls_back_to_inline_when_missing(monkeypatch, capsys):
+    called = {}
+
+    class FakeInlineTUI:
+        def __init__(self, assume_yes=False, show_tools=True):
+            called["init"] = (assume_yes, show_tools)
+
+        def run(self):
+            called["run"] = True
+            return 23
+
+    monkeypatch.setattr(tui_module, "TEXTUAL_AVAILABLE", False)
+    monkeypatch.setattr(tui_module, "EvolvaInlineTUI", FakeInlineTUI)
+    assert tui_module.run_textual_tui(assume_yes=True, show_tools=False) == 23
+    assert called == {"init": (True, False), "run": True}
+    assert "falling back to the inline TUI" in capsys.readouterr().out
+
+
+def test_textual_placeholder_raises_when_dependency_missing():
+    if tui_module.TEXTUAL_AVAILABLE:
+        pytest.skip("Textual is installed; placeholder is not active")
+    with pytest.raises(RuntimeError, match="Textual is not installed"):
+        tui_module.EvolvaTextualApp()
 
 def test_inline_tui_ctrl_c_requires_second_interrupt(monkeypatch, capsys, temp_config):
     monkeypatch.setattr("evolva.tui.AgentConfig", lambda: temp_config)
