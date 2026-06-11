@@ -19,6 +19,7 @@ from evolva.agent.evolution_analyzer import EvalEvolutionAnalyzer, TraceEvolutio
 from evolva.agent.core import EvolvaAgent, TurnResult
 from evolva.config import AgentConfig, mask_secret, remove_runtime_config_keys, save_runtime_config
 from evolva.loops import LoopRunner, render_loop_result, render_loop_specs
+from evolva.workflow.engine import WorkflowEngine
 
 
 try:  # Textual is the preferred production TUI renderer when installed.
@@ -501,6 +502,15 @@ class EvolvaTUI:
                     thread.start()
                 else:
                     self._add_system("Usage: /loop list | /loop show <loop_id|path> | /loop run <loop_id|path>")
+            elif line.startswith("/workflow"):
+                rest = line.removeprefix("/workflow").strip()
+                if not rest:
+                    self._add_system("Usage: /workflow <json-spec-path>")
+                    return
+                self.busy = True
+                self.status = "Running workflow..."
+                thread = threading.Thread(target=self._worker_workflow, args=(rest,), daemon=True)
+                thread.start()
             elif line.startswith("/run"):
                 self.busy = True
                 self.status = "Running tool..."
@@ -708,6 +718,15 @@ class EvolvaTUI:
             self.queue.put(("loop_result", result))
         except Exception as exc:
             self.queue.put(("error", f"Loop error: {exc}"))
+
+    def _worker_workflow(self, path: str) -> None:
+        try:
+            output = WorkflowEngine(self.agent).run_file(self.agent.sandbox.resolve(path))
+            body = "\n".join(output.logs)
+            body += f"\nWorkflow {output.workflow_id}: {'ok' if output.ok else 'failed'}"
+            self.queue.put(("system", body.strip()))
+        except Exception as exc:
+            self.queue.put(("error", f"Workflow error: {exc}"))
 
     def _drain_queue(self) -> None:
         while True:
@@ -1124,7 +1143,7 @@ if TEXTUAL_AVAILABLE:
             Binding("ctrl+t", "toggle_tools", "Tools"),
         ]
 
-        THINKING_FRAMES = ("●", "◐", "◓", "◑", "◒")
+        THINKING_FRAMES = ("✢", "✣", "✤", "✥", "✦", "✧", "✶", "✷", "✸", "✹", "✺", "✽")
         THINKING_MESSAGES = (
             "Working on the next step...",
             "Reasoning over context...",
@@ -1140,6 +1159,7 @@ if TEXTUAL_AVAILABLE:
             self.show_tools = show_tools
             self._printed_messages = 0
             self._spinner_tick = 0
+            self._thinking_started_at: float | None = None
             self._last_tool_log: str | None = None
 
         def compose(self) -> ComposeResult:
@@ -1300,14 +1320,13 @@ if TEXTUAL_AVAILABLE:
         def _thinking_line(self) -> str:
             """Return the animated reasoning indicator shown while Evolva is busy."""
 
+            if self._thinking_started_at is None:
+                self._thinking_started_at = time.monotonic()
             self._spinner_tick += 1
-            frame = self.THINKING_FRAMES[self._spinner_tick % len(self.THINKING_FRAMES)]
-            message = self.THINKING_MESSAGES[(self._spinner_tick // 6) % len(self.THINKING_MESSAGES)]
-            next_step = self.runtime.status if self.runtime.status and self.runtime.status not in {"Ready", "ready", "thinking", ""} else "streaming trace + context"
-            return (
-                f"[#F2C96B]{frame}[/] [bold #F2C96B]Evolva is reasoning[/] "
-                f"[#A7A096]· {message} · Next: {next_step}[/]"
-            )
+            frame = self.THINKING_FRAMES[(self._spinner_tick - 1) % len(self.THINKING_FRAMES)]
+            elapsed = max(0, int(time.monotonic() - self._thinking_started_at))
+            state = self.runtime.status if self.runtime.status and self.runtime.status not in {"Ready", "ready", ""} else "thinking"
+            return f"[#F2C96B]{frame}[/] [bold #F2C96B]Orbiting…[/] [#A7A096]({elapsed}s · {state})[/]"
 
         def _refresh_status(self) -> None:
             thinking = self.query_one("#thinking", Static)
@@ -1319,6 +1338,7 @@ if TEXTUAL_AVAILABLE:
                 thinking.set_class(True, "hidden")
                 thinking.update("")
                 self._spinner_tick = 0
+                self._thinking_started_at = None
                 state = "READY"
             if self.runtime.status and self.runtime.status not in {"Ready", "ready", "thinking", ""}:
                 state = self.runtime.status

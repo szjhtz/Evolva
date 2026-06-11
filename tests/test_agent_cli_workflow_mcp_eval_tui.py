@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from argparse import Namespace
 from dataclasses import replace
 
@@ -512,6 +513,27 @@ def test_tui_non_curses_command_completion_queue_and_confirmation(monkeypatch, t
     app._handle_command("/mcp remove tui-demo")
     assert "tui-demo" not in app.agent.mcp.list_servers()
     assert any("Removed MCP server" in m.text for m in app.messages)
+    workflow_path = temp_config.root / "evolva" / "workflows" / "tui-demo.json"
+    workflow_path.parent.mkdir(parents=True, exist_ok=True)
+    workflow_path.write_text(
+        json.dumps(
+            {
+                "id": "tui-demo",
+                "nodes": [
+                    {"id": "sandbox", "type": "tool", "tool": "sandbox_info", "args": {}},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    app._handle_command(f"/workflow {workflow_path.relative_to(temp_config.root)}")
+    for _ in range(100):
+        app._drain_queue()
+        if "Workflow tui-demo: ok" in app.messages[-1].text:
+            break
+        time.sleep(0.01)
+    app._drain_queue()
+    assert "Workflow tui-demo: ok" in app.messages[-1].text
     app.input_text = "/mo"
     app._complete_command()
     assert app.input_text == "/model "
@@ -693,15 +715,22 @@ def test_textual_tui_shows_reasoning_indicator(monkeypatch, temp_config):
             app._refresh_status()
             thinking = app.query_one("#thinking", tui_module.Static)
             first = getattr(thinking, "_Static__content", "")
-            assert "Evolva is reasoning" in first
-            assert "Next:" in first
+            assert "Orbiting" in first
+            assert "thinking" in first
             assert "hidden" not in thinking.classes
             assert app._spinner_tick == 1
 
             app._refresh_status()
             second = getattr(thinking, "_Static__content", "")
             assert second != first
+            assert "Orbiting" in second
             assert app._spinner_tick == 2
+
+            app._thinking_started_at -= 3
+            app._refresh_status()
+            elapsed = getattr(thinking, "_Static__content", "")
+            assert any(frame in elapsed for frame in app.THINKING_FRAMES)
+            assert "(3s · thinking)" in elapsed
 
             app.runtime.busy = False
             app.runtime.status = "Ready"
@@ -709,6 +738,7 @@ def test_textual_tui_shows_reasoning_indicator(monkeypatch, temp_config):
             assert getattr(thinking, "_Static__content", "") == ""
             assert "hidden" in thinking.classes
             assert app._spinner_tick == 0
+            assert app._thinking_started_at is None
 
     import asyncio
 
@@ -728,8 +758,8 @@ def test_textual_reasoning_indicator_includes_operation_status(monkeypatch, temp
             thinking = app.query_one("#thinking", tui_module.Static)
             content = getattr(thinking, "_Static__content", "")
             status = getattr(app.query_one("#status", tui_module.Static), "_Static__content", "")
-            assert "Evolva is reasoning" in content
-            assert "Next: Running tool..." in content
+            assert "Orbiting" in content
+            assert "Running tool..." in content
             assert "Running tool..." in status
 
     import asyncio
