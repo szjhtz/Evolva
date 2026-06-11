@@ -283,7 +283,9 @@ evolva eval evals/tasks/smoke.jsonl --yes \
   --no-regression
 ```
 
-JSONL 任务不再绑定单一 checklist，而是进入可插拔 Scorer Registry：内置 `contains`、`not_contains`、`regex`、`artifact_exists`、`artifact_contains`、`json_match`、`memory_contains`、`context_contains`、`trace_event`、`tool_sequence`、`command`、`latency`、`no_tool_error` 等评测算子。每个 check 都会产出 dimension、weight、evidence、expected/actual，并汇总为 weighted score，便于业务方继续接入自定义 rule-based scorer 或 LLM-as-judge。baseline 位于 `evals/baselines/`，CI 配置位于 `.github/workflows/ci.yml`。
+JSONL 任务不再绑定单一 checklist，而是进入可插拔 Scorer Registry：内置 `contains`、`not_contains`、`regex`、`artifact_exists`、`artifact_contains`、`artifact_manifest`、`json_match`、`memory_contains`、`context_contains`、`trace_event`、`trace_schema`、`tool_sequence`、`command`、`latency`、`no_tool_error` 等评测算子。每个 check 都会产出 dimension、weight、evidence、expected/actual，并汇总为 weighted score，便于业务方继续接入自定义 rule-based scorer 或 LLM-as-judge。baseline 位于 `evals/baselines/`，CI 配置位于 `.github/workflows/ci.yml`。
+
+Trace 与 artifact 也进入同一套回归体系：Evolva trace 使用 `trace.v1` schema，为每个事件分配 `event_id`、`span_id`、`parent_id`，方便 TUI/可视化层构建 timeline/DAG；写文件等产物会同步进入 `evolva/artifacts/manifest.jsonl`，记录 path、sha256、producer、run_id 与 event_id，让 Eval、Replay、Dream 能基于同一份可审计证据工作。
 
 
 ## 当前工程化缺口与演进方向
@@ -293,8 +295,8 @@ Evolva 的目标不是把所有业务场景包装成一个“万能 Agent 分数
 | 模块 | 之前容易显得 toy 的点 | 本轮/后续生产化方向 |
 | --- | --- | --- |
 | Eval Score | 固定字符串 checklist，解释性弱 | 已升级为 Scorer Registry，多维 weighted score，并内置 artifact / trace / command / tool sequence 算子 |
-| Trace | JSON 文件可读但缺少标准 schema 与查询层 | 后续补 trace schema version、索引、DAG/timeline 可视化与跨 run 聚合 |
-| Sandbox | 本地路径与命令策略为主 | 后续扩展容器/进程级隔离、资源限额、网络策略和 artifact manifest |
+| Trace | JSON 文件可读但缺少标准 schema 与查询层 | 已升级为 `trace.v1`，事件具备 ID/span/parent，可继续扩展索引、DAG/timeline 可视化与跨 run 聚合 |
+| Sandbox / Artifact | 本地路径与命令策略为主，产物缺少统一 provenance | 已加入 artifact manifest，记录 sha256、producer、trace run/event；后续扩展容器/进程级隔离、资源限额和网络策略 |
 | Repo Index | 轻量符号/文本检索 | 后续补 tree-sitter 多语言增量索引、引用图、embedding backend 抽象 |
 | MCP | stdio 优先 | 后续补 HTTP/SSE、server health、tool schema cache 与权限策略 |
 | Dream / Loop | 已有候选与 verifier，但还需要更多闭环数据 | 后续把 eval failure、trace anomaly、cost/latency 自动转为 Dream candidate，并要求 verifier 后再 promotion |

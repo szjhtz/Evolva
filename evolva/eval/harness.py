@@ -60,7 +60,12 @@ class EvalHarness:
         started = time.time()
         if "tool" in task:
             tool_name = str(task["tool"])
+            self.agent.tracer.start(
+                f"eval:{task.get('id', 'unnamed')}:{tool_name}",
+                meta={"runtime": "eval", "task_id": str(task.get("id", "unnamed")), "tool": tool_name},
+            )
             tool_result = self.agent._call_tool(tool_name, dict(task.get("args", {})))
+            self.agent.tracer.end(tool_result.output, status="completed" if tool_result.ok else "tool_failed")
             answer = tool_result.output
             tool_logs = [f"TOOL {tool_name} ok={tool_result.ok}\n{tool_result.output}"]
         else:

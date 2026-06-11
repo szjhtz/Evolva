@@ -17,6 +17,7 @@ class AgentConfig:
     context_file: Path = ROOT / "evolva" / "context" / "context.json"
     todo_file: Path = ROOT / "evolva" / "todo" / "todos.json"
     traces_dir: Path = ROOT / "evolva" / "traces"
+    artifacts_file: Path = ROOT / "evolva" / "artifacts" / "manifest.jsonl"
     eval_results_dir: Path = ROOT / "evolva" / "eval_results"
     dreams_dir: Path = ROOT / "evolva" / "dreams"
     workflows_dir: Path = ROOT / "evolva" / "workflows"
@@ -32,6 +33,12 @@ class AgentConfig:
     max_steps: int = int(os.getenv("EVOLVA_MAX_STEPS", "8"))
     auto_evolve: bool = os.getenv("EVOLVA_AUTO_EVOLVE", "1") != "0"
 
+    def __post_init__(self) -> None:
+        # Keep backward-compatible tests/callers that construct a temp-root
+        # config without passing newly added paths.
+        if self.root != ROOT and self.artifacts_file == ROOT / "evolva" / "artifacts" / "manifest.jsonl":
+            object.__setattr__(self, "artifacts_file", self.root / "evolva" / "artifacts" / "manifest.jsonl")
+
     def ensure_dirs(self) -> None:
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.memory_file.parent.mkdir(parents=True, exist_ok=True)
@@ -39,6 +46,7 @@ class AgentConfig:
         self.context_file.parent.mkdir(parents=True, exist_ok=True)
         self.todo_file.parent.mkdir(parents=True, exist_ok=True)
         self.traces_dir.mkdir(parents=True, exist_ok=True)
+        self.artifacts_file.parent.mkdir(parents=True, exist_ok=True)
         self.eval_results_dir.mkdir(parents=True, exist_ok=True)
         self.dreams_dir.mkdir(parents=True, exist_ok=True)
         self.workflows_dir.mkdir(parents=True, exist_ok=True)

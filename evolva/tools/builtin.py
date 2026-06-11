@@ -60,8 +60,21 @@ def build_registry(
                 f.write(content)
         else:
             p.write_text(content, encoding="utf-8")
-        context.add("artifact", f"Wrote file {p.relative_to(sandbox.root)}", meta={"path": str(p), "chars": len(content), "append": append})
-        return ToolResult(True, f"Wrote {len(content)} chars to {p.relative_to(sandbox.root)}")
+        rel = p.relative_to(sandbox.root).as_posix()
+        context.add("artifact", f"Wrote file {rel}", meta={"path": str(p), "chars": len(content), "append": append})
+        return ToolResult(
+            True,
+            f"Wrote {len(content)} chars to {rel}",
+            {
+                "artifact": {
+                    "path": rel,
+                    "absolute_path": str(p),
+                    "kind": "file",
+                    "chars": len(content),
+                    "append": append,
+                }
+            },
+        )
 
     def shell(command: str, cwd: str = ".", timeout: int = 30) -> ToolResult:
         result = sandbox.run_shell(command, cwd=cwd, timeout=timeout)

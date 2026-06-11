@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "name": "trace_artifacts",
+  "summary": {
+    "total": 1,
+    "passed": 1,
+    "failed": 0,
+    "avg_score": 1.0
+  },
+  "tasks": {
+    "trace_artifact_manifest_001": {
+      "passed": true,
+      "min_score": 1.0
+    }
+  }
+}

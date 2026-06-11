@@ -8,22 +8,41 @@ from pathlib import Path
 from typing import Any
 
 
+TRACE_SCHEMA_VERSION = "trace.v1"
+
+
 @dataclass
 class TraceEvent:
+    """One structured trace event in a run timeline."""
+
     ts: float
     kind: str
     data: dict[str, Any] = field(default_factory=dict)
+    event_id: str = ""
+    span_id: str = ""
+    parent_id: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass
 class TraceRun:
+    """A persisted Evolva execution trace.
+
+    schema_version makes traces explicitly versioned so replay, eval, and Dream
+    analysis can evolve without silently breaking older runs.
+    """
+
     run_id: str
     started_at: float
+    schema_version: str = TRACE_SCHEMA_VERSION
     status: str = "running"
     user_input: str = ""
     final_answer: str = ""
     events: list[TraceEvent] = field(default_factory=list)
     ended_at: float | None = None
+    summary: dict[str, Any] = field(default_factory=dict)
 
 
 class TraceRecorder:
@@ -33,19 +52,54 @@ class TraceRecorder:
         self.traces_dir = traces_dir
         self.enabled = enabled
         self.current: TraceRun | None = None
+        self._event_seq = 0
         self.traces_dir.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def current_run_id(self) -> str:
+        return self.current.run_id if self.current is not None else ""
 
     def start(self, user_input: str, *, meta: dict[str, Any] | None = None) -> str:
         run_id = time.strftime("run_%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:8]
+        self._event_seq = 0
         self.current = TraceRun(run_id=run_id, started_at=time.time(), user_input=user_input)
         if meta:
-            self.event("run_meta", meta)
+            self.event("run_meta", meta, parent_id="")
         return run_id
 
-    def event(self, kind: str, data: dict[str, Any] | None = None) -> None:
+    def event(
+        self,
+        kind: str,
+        data: dict[str, Any] | None = None,
+        *,
+        span_id: str | None = None,
+        parent_id: str | None = None,
+    ) -> str | None:
+        """Append an event and return its event_id.
+
+        Existing callers can keep using event(kind, data). New callers may pass
+        span_id/parent_id to build DAG-like timelines for visualization.
+        """
+
         if not self.enabled or self.current is None:
-            return
-        self.current.events.append(TraceEvent(ts=time.time(), kind=kind, data=data or {}))
+            return None
+        self._event_seq += 1
+        event_id = f"evt_{self._event_seq:04d}"
+        if span_id is None:
+            safe_kind = "".join(ch if ch.isalnum() else "_" for ch in kind.lower()).strip("_") or "event"
+            span_id = f"span_{safe_kind}_{self._event_seq:04d}"
+        if parent_id is None:
+            parent_id = self.current.events[-1].event_id if self.current.events else ""
+        event = TraceEvent(
+            ts=time.time(),
+            kind=kind,
+            data=data or {},
+            event_id=event_id,
+            span_id=span_id,
+            parent_id=parent_id,
+        )
+        self.current.events.append(event)
+        return event_id
 
     def end(self, final_answer: str, *, status: str = "completed") -> Path | None:
         if not self.enabled or self.current is None:
@@ -54,6 +108,7 @@ class TraceRecorder:
         self.current.final_answer = final_answer
         self.current.status = status
         self.current.ended_at = time.time()
+        self.current.summary = self._summarize_run(self.current)
         path = self.path_for(self.current.run_id)
         self._write(path, self.current)
         self.current = None
@@ -72,12 +127,18 @@ class TraceRecorder:
                 data = json.loads(path.read_text(encoding="utf-8"))
             except Exception:
                 continue
+            summary = data.get("summary") or self._summarize_data(data)
             rows.append(
                 {
                     "run_id": data.get("run_id", path.stem),
+                    "schema_version": data.get("schema_version", "trace.legacy"),
                     "status": data.get("status", "unknown"),
                     "started_at": data.get("started_at"),
-                    "duration_ms": self._duration_ms(data),
+                    "duration_ms": summary.get("duration_ms", self._duration_ms(data)),
+                    "event_count": summary.get("event_count", len(data.get("events", []))),
+                    "tool_calls": summary.get("tool_calls", 0),
+                    "tool_failures": summary.get("tool_failures", 0),
+                    "artifacts": summary.get("artifacts", 0),
                     "user_input": data.get("user_input", "")[:120],
                     "path": str(path),
                 }
@@ -94,6 +155,7 @@ class TraceRecorder:
         data = self.load(run_id)
         lines = [
             f"Trace: {data.get('run_id')}",
+            f"Schema: {data.get('schema_version', 'trace.legacy')}",
             f"Status: {data.get('status')}",
             f"Duration: {self._duration_ms(data)} ms",
             f"User: {data.get('user_input', '')}",
@@ -101,8 +163,12 @@ class TraceRecorder:
         ]
         for event in data.get("events", []):
             kind = event.get("kind", "event")
+            event_id = event.get("event_id", "evt_legacy")
+            span_id = event.get("span_id", "")
+            parent_id = event.get("parent_id", "")
             payload = json.dumps(event.get("data", {}), ensure_ascii=False, sort_keys=True)
-            lines.append(f"- {kind}: {payload[:1200]}")
+            edge = f" span={span_id}" + (f" parent={parent_id}" if parent_id else "")
+            lines.append(f"- {event_id} {kind}{edge}: {payload[:1200]}")
         lines.append("Final:")
         lines.append(data.get("final_answer", ""))
         return "\n".join(lines)
@@ -112,6 +178,7 @@ class TraceRecorder:
         data = self.load(run_id)
         lines = [
             f"Trace context: {data.get('run_id')}",
+            f"Schema: {data.get('schema_version', 'trace.legacy')}",
             f"User: {data.get('user_input', '')}",
             "Context events:",
         ]
@@ -122,10 +189,29 @@ class TraceRecorder:
             if kind in {"run_meta", "prompt", "context_write", "auto_evolve"}:
                 matched = True
                 rendered = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-                lines.append(f"- {kind}: {rendered[:2000]}")
+                lines.append(f"- {event.get('event_id', 'evt_legacy')} {kind}: {rendered[:2000]}")
         if not matched:
             lines.append("No context events recorded for this trace.")
         return "\n".join(lines)
+
+    def timeline(self, run_id: str) -> list[dict[str, Any]]:
+        """Return a normalized timeline for TUI/HTML visualization."""
+        data = self.load(run_id)
+        started = data.get("started_at") or 0
+        rows: list[dict[str, Any]] = []
+        for event in data.get("events", []):
+            ts = event.get("ts") or started
+            rows.append(
+                {
+                    "event_id": event.get("event_id", ""),
+                    "span_id": event.get("span_id", ""),
+                    "parent_id": event.get("parent_id", ""),
+                    "kind": event.get("kind", "event"),
+                    "offset_ms": int((ts - started) * 1000) if started else 0,
+                    "data": event.get("data", {}),
+                }
+            )
+        return rows
 
     def replay_prompt(self, run_id: str) -> str:
         data = self.load(run_id)
@@ -134,6 +220,24 @@ class TraceRecorder:
     def _write(self, path: Path, run: TraceRun) -> None:
         data = asdict(run)
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _summarize_run(self, run: TraceRun) -> dict[str, Any]:
+        data = asdict(run)
+        return self._summarize_data(data)
+
+    def _summarize_data(self, data: dict[str, Any]) -> dict[str, Any]:
+        events = data.get("events", []) or []
+        tool_calls = [event for event in events if event.get("kind") == "tool_call"]
+        tool_failures = [event for event in tool_calls if not (event.get("data", {}) or {}).get("ok", False)]
+        artifact_events = [event for event in events if event.get("kind") == "artifact"]
+        return {
+            "event_count": len(events),
+            "tool_calls": len(tool_calls),
+            "tool_failures": len(tool_failures),
+            "artifacts": len(artifact_events),
+            "duration_ms": self._duration_ms(data),
+            "kinds": sorted({str(event.get("kind", "event")) for event in events}),
+        }
 
     def _duration_ms(self, data: dict[str, Any]) -> int | None:
         started = data.get("started_at")

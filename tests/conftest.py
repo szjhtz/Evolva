@@ -22,6 +22,7 @@ def temp_config(tmp_path: Path) -> AgentConfig:
         context_file=base / "context" / "context.json",
         todo_file=base / "todo" / "todos.json",
         traces_dir=base / "traces",
+        artifacts_file=base / "artifacts" / "manifest.jsonl",
         eval_results_dir=base / "eval_results",
         dreams_dir=base / "dreams",
         workflows_dir=base / "workflows",

@@ -147,6 +147,8 @@ class ScorerRegistry:
             ("expected_memory", "memory_contains"),
             ("expected_context", "context_contains"),
             ("expected_trace_events", "trace_event"),
+            ("expected_trace_schema", "trace_schema"),
+            ("expected_artifact_manifest", "artifact_manifest"),
             ("expected_tool_sequence", "tool_sequence"),
             ("max_duration_ms", "latency"),
             ("command_checks", "command"),
@@ -170,6 +172,8 @@ def build_default_registry() -> ScorerRegistry:
     registry.register("latency", latency_scorer)
     registry.register("no_tool_error", no_tool_error_scorer)
     registry.register("trace_event", trace_event_scorer)
+    registry.register("trace_schema", trace_schema_scorer)
+    registry.register("artifact_manifest", artifact_manifest_scorer)
     registry.register("tool_sequence", tool_sequence_scorer)
     registry.register("command", command_scorer)
     return registry
@@ -382,6 +386,87 @@ def trace_event_scorer(task: dict[str, Any], context: ScorerContext) -> Iterable
             passed = bool(matched)
             name = f"trace_event:{kind}" + (f":{data_contains}" if data_contains else "")
             checks.append(ScoreCheck(name, passed, "trace", expected=spec, actual=len(matched), evidence="event matched" if passed else "event missing"))
+    return checks
+
+
+def trace_schema_scorer(task: dict[str, Any], context: ScorerContext) -> Iterable[ScoreCheck]:
+    expected = str(task.get("expected_trace_schema", "trace.v1"))
+    if context.agent is None:
+        return [ScoreCheck("trace_schema:agent", False, "trace", evidence="agent unavailable")]
+    try:
+        if getattr(context.agent.tracer, "current", None) is not None:
+            trace = {
+                "schema_version": context.agent.tracer.current.schema_version,
+                "events": [event.to_dict() if hasattr(event, "to_dict") else {"kind": event.kind, "data": event.data} for event in context.agent.tracer.current.events],
+            }
+        else:
+            run_id = context.agent.tracer.list_runs(limit=1)[0]["run_id"]
+            trace = context.agent.tracer.load(run_id)
+    except Exception as exc:
+        return [ScoreCheck("trace_schema:load_latest", False, "trace", evidence=str(exc))]
+    events = trace.get("events", []) or []
+    schema_ok = trace.get("schema_version") == expected
+    event_ids_ok = all(bool(event.get("event_id")) for event in events)
+    span_ids_ok = all("span_id" in event and "parent_id" in event for event in events)
+    return [
+        ScoreCheck("trace_schema:version", schema_ok, "trace", expected=expected, actual=trace.get("schema_version"), evidence="schema matched" if schema_ok else "schema mismatch"),
+        ScoreCheck("trace_schema:event_ids", event_ids_ok, "trace", expected="event_id on every event", actual=len(events), evidence="events are addressable" if event_ids_ok else "missing event_id"),
+        ScoreCheck("trace_schema:span_edges", span_ids_ok, "trace", expected="span_id and parent_id on every event", actual=len(events), evidence="events include timeline edges" if span_ids_ok else "missing span edges"),
+    ]
+
+
+def artifact_manifest_scorer(task: dict[str, Any], context: ScorerContext) -> Iterable[ScoreCheck]:
+    specs = task.get("expected_artifact_manifest", [])
+    if not specs:
+        return []
+    if context.agent is None or not hasattr(context.agent, "artifacts"):
+        return [ScoreCheck("artifact_manifest:agent", False, "artifact", evidence="artifact manifest unavailable")]
+    checks: list[ScoreCheck] = []
+    for spec in specs:
+        if isinstance(spec, str):
+            spec = {"path": spec}
+        if not isinstance(spec, dict):
+            checks.append(ScoreCheck("artifact_manifest:config", False, "artifact", evidence="manifest spec must be string or object"))
+            continue
+        artifact_path = str(spec.get("path", ""))
+        records = context.agent.artifacts.find(artifact_path)
+        latest = records[-1] if records else None
+        checks.append(
+            ScoreCheck(
+                name=f"artifact_manifest:recorded:{artifact_path}",
+                passed=latest is not None,
+                dimension="artifact",
+                expected=artifact_path,
+                actual=latest.to_dict() if latest else None,
+                evidence="artifact recorded in manifest" if latest else "artifact missing from manifest",
+            )
+        )
+        if latest is None:
+            continue
+        producer = spec.get("producer")
+        if producer is not None:
+            checks.append(
+                ScoreCheck(
+                    name=f"artifact_manifest:producer:{artifact_path}",
+                    passed=latest.producer == str(producer),
+                    dimension="artifact",
+                    expected=str(producer),
+                    actual=latest.producer,
+                    evidence="producer matched" if latest.producer == str(producer) else "producer mismatch",
+                )
+            )
+        sha256 = spec.get("sha256")
+        if sha256 is not None:
+            checks.append(
+                ScoreCheck(
+                    name=f"artifact_manifest:sha256:{artifact_path}",
+                    passed=latest.sha256 == str(sha256),
+                    dimension="artifact",
+                    expected=str(sha256),
+                    actual=latest.sha256,
+                    evidence="sha256 matched" if latest.sha256 == str(sha256) else "sha256 mismatch",
+                )
+            )
     return checks
 
 

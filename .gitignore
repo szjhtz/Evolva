@@ -23,4 +23,5 @@ evolva/optimization_reports/
 evolva/repo_index/
 evolva/workflows/
 evolva/workspace/
+evolva/artifacts/
 evolva/mcp/servers.json

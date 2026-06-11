@@ -130,7 +130,9 @@ def test_trace_recorder_list_load_render_disabled_and_path_sanitization(tmp_path
     path = traces.end("done")
     assert path and path.exists()
     assert traces.list_runs(limit=1)[0]["run_id"] == run_id
+    assert traces.list_runs(limit=1)[0]["schema_version"] == "trace.v1"
     assert traces.load(run_id)["final_answer"] == "done"
+    assert traces.load(run_id)["summary"]["event_count"] == 2
     assert "tool_call" in traces.render(run_id)
     assert traces.replay_prompt(run_id) == "hello"
     assert traces.path_for("../bad.json").name == "__bad.json"

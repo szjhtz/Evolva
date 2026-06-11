@@ -104,9 +104,31 @@ def test_trace_recorder_roundtrip(tmp_path):
     traces.event("prompt", {"message_count": 2, "system_chars": 10})
     traces.event("tool_call", {"tool": "noop", "ok": True})
     traces.end("done")
+    payload = traces.load(run_id)
+    assert payload["schema_version"] == "trace.v1"
+    assert payload["events"][0]["event_id"] == "evt_0001"
+    assert payload["events"][1]["parent_id"] == "evt_0001"
+    assert payload["summary"]["tool_calls"] == 1
     assert run_id in traces.render(run_id)
     assert "message_count" in traces.render_context(run_id)
+    assert traces.timeline(run_id)[0]["kind"] == "prompt"
     assert traces.replay_prompt(run_id) == "hello"
+
+
+def test_agent_records_artifact_manifest_and_trace(temp_config):
+    agent = EvolvaAgent(temp_config, assume_yes=True)
+    run_id = agent.tracer.start("write artifact")
+    result = agent._call_tool("write_file", {"path": "evolva/workspace/a.txt", "content": "manifest ok\n"})
+    agent.tracer.end(result.output)
+
+    assert result.ok
+    records = agent.artifacts.find("evolva/workspace/a.txt")
+    assert records
+    assert records[-1].producer == "write_file"
+    assert len(records[-1].sha256) == 64
+    assert records[-1].run_id == run_id
+    trace = agent.tracer.load(run_id)
+    assert any(event["kind"] == "artifact" for event in trace["events"])
 
 
 def test_workflow_engine_tool_node(tmp_path):

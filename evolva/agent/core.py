@@ -6,6 +6,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from evolva.agent.context import ContextStore
+from evolva.agent.artifacts import ArtifactManifest
 from evolva.agent.dream import DreamEngine
 from evolva.agent.evolution import SelfEvolutionEngine
 from evolva.agent.images import user_content_with_images
@@ -64,6 +65,7 @@ class EvolvaAgent:
         self.sandbox = Sandbox(SandboxPolicy(self.config.root, self.config.workspace, self.config.sandbox_allow_shell))
         self.policy = PolicyEngine(PolicyConfig(self.config.root, self.config.workspace))
         self.tracer = TraceRecorder(self.config.traces_dir, enabled=self.config.tracing_enabled)
+        self.artifacts = ArtifactManifest(self.config.artifacts_file, self.config.root)
         self.mcp = MCPManager(self.config.mcp_config_file, root=self.config.root)
         self.llm = OpenAICompatibleLLM(self.config)
         self.coordinator = MultiAgentCoordinator(self.llm, self.memory, self.skills, self.todos)
@@ -172,7 +174,7 @@ class EvolvaAgent:
 
             started = time.time()
             result = self.tools.call(name, args)
-            self.tracer.event(
+            event_id = self.tracer.event(
                 "tool_call",
                 {
                     "tool": name,
@@ -182,10 +184,37 @@ class EvolvaAgent:
                     "output": result.output[:4000],
                 },
             )
+            self._record_tool_artifacts(name, result, event_id or "")
             return result
         except Exception as exc:
             self.tracer.event("tool_error", {"tool": name, "error": str(exc)})
             return ToolResult(False, f"Tool error: {exc}")
+
+    def _record_tool_artifacts(self, tool_name: str, result: ToolResult, event_id: str) -> None:
+        """Persist artifact provenance from tool results into manifest and trace."""
+
+        if not result.ok or not isinstance(result.data, dict):
+            return
+        artifact = result.data.get("artifact")
+        if artifact is None:
+            return
+        artifacts = artifact if isinstance(artifact, list) else [artifact]
+        for item in artifacts:
+            if not isinstance(item, dict) or not item.get("path"):
+                continue
+            try:
+                path = (self.config.root / str(item["path"])).resolve()
+                record = self.artifacts.record_file(
+                    path,
+                    producer=tool_name,
+                    run_id=self.tracer.current_run_id,
+                    event_id=event_id,
+                    kind=str(item.get("kind", "file")),
+                    metadata={k: v for k, v in item.items() if k not in {"path", "absolute_path", "kind"}},
+                )
+                self.tracer.event("artifact", record.to_dict(), parent_id=event_id)
+            except Exception as exc:
+                self.tracer.event("artifact_error", {"tool": tool_name, "artifact": item, "error": str(exc)}, parent_id=event_id)
 
     def _fallback_chat(self, user_message: str) -> TurnResult:
         """Rule-based mode for when no LLM is configured."""
