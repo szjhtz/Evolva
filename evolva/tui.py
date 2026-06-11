@@ -766,9 +766,10 @@ class EvolvaTUI:
 
     def _draw_title(self, y: int, w: int) -> None:
         icon = [
-            "  ▋▋ ▋▋ ",
-            " ▐▛███▜▌",
-            "▝▜█████▛▘",
+            "╭╮  ╭╮",
+            " ╰╮╭╯ ",
+            " ╭╯╰╮ ",
+            "╰╯  ╰╯",
         ]
         brand_x = 3 if w >= 72 else 1
         text_x = 18 if w >= 72 else 12
