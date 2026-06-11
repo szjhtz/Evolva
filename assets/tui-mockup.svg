@@ -78,5 +78,5 @@
 
   <rect x="120" y="800" width="1360" height="70" rx="18" fill="#0C0B09" stroke="#3A2A10"/>
   <text x="154" y="844" class="mono text" font-size="22">› /dream verify --min-confidence 0.8</text>
-  <text x="1260" y="844" class="mono dim" font-size="17">F2 model · F4 config · Ctrl+R trace</text>
+  <text x="1450" y="844" class="mono dim" font-size="17" text-anchor="end">F2 model · F4 config · Ctrl+R trace</text>
 </svg>
