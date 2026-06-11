@@ -24,6 +24,14 @@
   <img alt="Local First" src="https://img.shields.io/badge/Local--First-Agent%20Harness-2E8B57?style=for-the-badge&labelColor=0B0B0F" />
 </p>
 
+<p align="center">
+  <img src="assets/tui-mockup.svg" alt="Evolva TUI Workbench preview" width="100%" />
+</p>
+
+<p align="center">
+  <em>TUI-first Agent Workbench：模型配置、工具执行、Trace 上下文、MCP、Loop、Dreaming 都在同一个本地工作台内完成。</em>
+</p>
+
 ---
 
 ## 为什么是 Evolva
@@ -203,10 +211,6 @@ TUI 内示例：
 
 Evolva 的日常使用围绕 TUI Workbench 展开：对话、工具调用、MCP 接入、Trace 检索、模型切换、Loop/Workflow 编排和自我进化都收敛在同一套 Slash Commands 中。
 默认界面基于 **Textual** 渲染，提供持久对话区、Trace / Tool Stream 侧栏、状态栏和快捷键；依赖缺失时会自动回退到轻量 inline 模式。
-
-<p align="center">
-  <img src="assets/tui-mockup.svg" alt="Evolva TUI Workbench preview" width="100%" />
-</p>
 
 ```bash
 evolva
