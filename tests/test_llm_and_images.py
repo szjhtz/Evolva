@@ -57,6 +57,30 @@ def test_llm_chat_posts_openai_compatible_payload(monkeypatch, temp_config):
     assert captured["headers"]["Authorization"] == "Bearer sk-test"
 
 
+def test_llm_chat_uses_configured_default_temperature(monkeypatch, temp_config):
+    cfg = temp_config.__class__(**{**temp_config.__dict__, "api_key": "sk-test", "temperature": 1.0})
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": "hello"}}]}).encode()
+
+    def fake_urlopen(req, timeout):
+        captured["payload"] = json.loads(req.data.decode())
+        return FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    OpenAICompatibleLLM(cfg).chat([{"role": "user", "content": "hi"}])
+
+    assert captured["payload"]["temperature"] == 1.0
+
+
 def test_llm_chat_surfaces_http_error(monkeypatch, temp_config):
     cfg = temp_config.__class__(**{**temp_config.__dict__, "api_key": "sk-test"})
 

@@ -30,6 +30,7 @@ class AgentConfig:
     model: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     api_key: str | None = os.getenv("OPENAI_API_KEY")
     base_url: str = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    temperature: float = float(os.getenv("OPENAI_TEMPERATURE", "0.2"))
     max_steps: int = int(os.getenv("EVOLVA_MAX_STEPS", "8"))
     auto_evolve: bool = os.getenv("EVOLVA_AUTO_EVOLVE", "1") != "0"
 
