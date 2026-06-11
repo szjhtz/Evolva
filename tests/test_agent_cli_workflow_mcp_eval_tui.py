@@ -680,6 +680,62 @@ def test_textual_input_accepts_chinese_key_events():
     assert "你" in rendered[-1]
     assert event.stopped and event.prevented
 
+
+@pytest.mark.skipif(not tui_module.TEXTUAL_AVAILABLE, reason="Textual is not installed")
+def test_textual_tui_shows_reasoning_indicator(monkeypatch, temp_config):
+    monkeypatch.setattr("evolva.tui.AgentConfig", lambda: temp_config)
+
+    async def run_case():
+        app = tui_module.EvolvaTextualApp(assume_yes=True, show_tools=True)
+        async with app.run_test(size=(110, 32)):
+            app.runtime.busy = True
+            app.runtime.status = "thinking"
+            app._refresh_status()
+            thinking = app.query_one("#thinking", tui_module.Static)
+            first = getattr(thinking, "_Static__content", "")
+            assert "Evolva is reasoning" in first
+            assert "Next:" in first
+            assert "hidden" not in thinking.classes
+            assert app._spinner_tick == 1
+
+            app._refresh_status()
+            second = getattr(thinking, "_Static__content", "")
+            assert second != first
+            assert app._spinner_tick == 2
+
+            app.runtime.busy = False
+            app.runtime.status = "Ready"
+            app._refresh_status()
+            assert getattr(thinking, "_Static__content", "") == ""
+            assert "hidden" in thinking.classes
+            assert app._spinner_tick == 0
+
+    import asyncio
+
+    asyncio.run(run_case())
+
+
+@pytest.mark.skipif(not tui_module.TEXTUAL_AVAILABLE, reason="Textual is not installed")
+def test_textual_reasoning_indicator_includes_operation_status(monkeypatch, temp_config):
+    monkeypatch.setattr("evolva.tui.AgentConfig", lambda: temp_config)
+
+    async def run_case():
+        app = tui_module.EvolvaTextualApp(assume_yes=True, show_tools=True)
+        async with app.run_test(size=(110, 32)):
+            app.runtime.busy = True
+            app.runtime.status = "Running tool..."
+            app._refresh_status()
+            thinking = app.query_one("#thinking", tui_module.Static)
+            content = getattr(thinking, "_Static__content", "")
+            status = getattr(app.query_one("#status", tui_module.Static), "_Static__content", "")
+            assert "Evolva is reasoning" in content
+            assert "Next: Running tool..." in content
+            assert "Running tool..." in status
+
+    import asyncio
+
+    asyncio.run(run_case())
+
 def test_inline_tui_ctrl_c_requires_second_interrupt(monkeypatch, capsys, temp_config):
     monkeypatch.setattr("evolva.tui.AgentConfig", lambda: temp_config)
     events = iter([KeyboardInterrupt, "/exit"])

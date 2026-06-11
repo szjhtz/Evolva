@@ -1096,6 +1096,17 @@ if TEXTUAL_AVAILABLE:
             color: #A7A096;
             margin-top: 1;
         }
+        #thinking {
+            height: 2;
+            margin-top: 1;
+            padding: 0 1;
+            border-left: heavy #D9B762;
+            background: #0C0B09;
+            color: #D9B762;
+        }
+        #thinking.hidden {
+            display: none;
+        }
         #input {
             margin-top: 1;
             border: round #D9B762;
@@ -1113,11 +1124,23 @@ if TEXTUAL_AVAILABLE:
             Binding("ctrl+t", "toggle_tools", "Tools"),
         ]
 
+        THINKING_FRAMES = ("●", "◐", "◓", "◑", "◒")
+        THINKING_MESSAGES = (
+            "Working on the next step...",
+            "Reasoning over context...",
+            "Planning tool strategy...",
+            "Checking memory and skills...",
+            "Updating trace context...",
+            "Evaluating the response path...",
+        )
+
         def __init__(self, assume_yes: bool = False, show_tools: bool = True):
             super().__init__()
             self.runtime = EvolvaTUI(assume_yes=assume_yes, show_tools=show_tools)
             self.show_tools = show_tools
             self._printed_messages = 0
+            self._spinner_tick = 0
+            self._last_tool_log: str | None = None
 
         def compose(self) -> ComposeResult:
             with Container(id="shell"):
@@ -1130,6 +1153,7 @@ if TEXTUAL_AVAILABLE:
                     with Vertical(id="tool_panel", classes="" if self.show_tools else "hidden"):
                         yield Static("Trace / Tool Stream", classes="panel_title")
                         yield EvolvaLog(id="tools", wrap=True, highlight=True, markup=True)
+                yield Static("", id="thinking", classes="hidden")
                 yield Static("", id="status")
                 yield EvolvaInput(placeholder="You › ask Evolva, or type /help", id="input")
                 yield Footer()
@@ -1273,9 +1297,30 @@ if TEXTUAL_AVAILABLE:
         def _write_chat(self, text: str) -> None:
             self.query_one("#chat", EvolvaLog).write(text)
 
+        def _thinking_line(self) -> str:
+            """Return the animated reasoning indicator shown while Evolva is busy."""
+
+            self._spinner_tick += 1
+            frame = self.THINKING_FRAMES[self._spinner_tick % len(self.THINKING_FRAMES)]
+            message = self.THINKING_MESSAGES[(self._spinner_tick // 6) % len(self.THINKING_MESSAGES)]
+            next_step = self.runtime.status if self.runtime.status and self.runtime.status not in {"Ready", "ready", "thinking", ""} else "streaming trace + context"
+            return (
+                f"[#F2C96B]{frame}[/] [bold #F2C96B]Evolva is reasoning[/] "
+                f"[#A7A096]· {message} · Next: {next_step}[/]"
+            )
+
         def _refresh_status(self) -> None:
-            state = "THINKING" if self.runtime.busy else "READY"
-            if self.runtime.status and self.runtime.status not in {"Ready", "ready", ""}:
+            thinking = self.query_one("#thinking", Static)
+            if self.runtime.busy:
+                thinking.set_class(False, "hidden")
+                thinking.update(self._thinking_line())
+                state = "REASONING"
+            else:
+                thinking.set_class(True, "hidden")
+                thinking.update("")
+                self._spinner_tick = 0
+                state = "READY"
+            if self.runtime.status and self.runtime.status not in {"Ready", "ready", "thinking", ""}:
                 state = self.runtime.status
             status = f"{state} · {self.runtime._provider_label()} · {self.runtime._model_label()} · tools:{'on' if self.show_tools else 'off'} · {self.runtime._token_estimate()} tokens"
             self.query_one("#status", Static).update(status)
