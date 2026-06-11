@@ -612,7 +612,7 @@ def test_tui_draws_polished_shell(monkeypatch, temp_config):
     rendered = "\n".join(writes)
     assert "E V O L A  Agent Workbench" in rendered
     assert "local_rule-mode" in rendered
-    assert "pytest-of-bytedance" in rendered
+    assert app._path_label(78) in rendered
     assert "╭───────●" in rendered
     assert "Evolva is a local-first Agent Harness." in rendered
     assert "Trace / Tool Stream" in rendered
