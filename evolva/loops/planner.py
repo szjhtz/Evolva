@@ -34,6 +34,8 @@ RESERVED_LOOP_COMMANDS = {
     "run",
     "plan",
     "revise",
+    "approve",
+    "accept",
     "confirm",
     "execute",
     "save",
@@ -93,6 +95,7 @@ class DraftPhase:
     depends_on: list[str] = field(default_factory=list)
     expected_output: str = ""
     user_visible: bool = True
+    requires_user_confirmation: bool = False
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "DraftPhase":
@@ -104,6 +107,7 @@ class DraftPhase:
             depends_on=[str(item) for item in data.get("depends_on", [])],
             expected_output=str(data.get("expected_output", "")),
             user_visible=bool(data.get("user_visible", True)),
+            requires_user_confirmation=bool(data.get("requires_user_confirmation", False)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -324,7 +328,7 @@ class LoopSpecSynthesizer:
             "name": f"Generated {intent_type.replace('_', ' ').title()} Loop",
             "description": f"Generated from Loop Planner draft {draft_id}. User request: {request}",
             "trigger": {"type": "manual", "source": "loop_planner", "draft_id": draft_id},
-            "command_allowlist": command_candidates,
+            "command_allowlist": sanitize_command_candidates(command_candidates),
             "execution_limits": limits.to_dict(),
             "phases": phases,
             "gates": gates,
@@ -369,6 +373,13 @@ class LoopSpecSynthesizer:
                     }
                 )
                 continue
+            prior_context = "\n".join(f"- {dep}: {{{{{dep}}}}}" for dep in deps) or "- none"
+            confirmation_note = (
+                "\nThis phase follows user confirmation of the draft/open questions. "
+                "If the remaining information is still insufficient, stop and explain the blocker instead of guessing."
+                if phase.requires_user_confirmation
+                else ""
+            )
             prompt = (
                 f"Loop phase: {phase.title or phase_id}\n"
                 f"User request: {{{{user_request}}}}\n"
@@ -376,8 +387,13 @@ class LoopSpecSynthesizer:
                 f"Overall goal: {goal}\n"
                 f"Phase purpose: {purpose}\n"
                 f"Expected output: {expected}\n"
+                f"Previous phase outputs:\n{prior_context}\n"
+                "Operate like a production coding agent: inspect only the minimum context needed, "
+                "make concrete progress, finish with final once this phase's expected output is satisfied, "
+                "and do not keep reading files after enough evidence is available. "
                 "Respect existing project style, keep changes scoped, avoid destructive actions, "
                 "and clearly report evidence, assumptions, blockers, and residual risks."
+                f"{confirmation_note}"
             )
             output.append(
                 {
@@ -525,7 +541,8 @@ class LLMLoopPlanner:
             self.last_warnings.append("LLM planner unavailable: model/API key is not configured; using heuristic fallback.")
             return None
         try:
-            response = llm.chat(self._messages(request, agent=agent), temperature=0.1)
+            planner_temperature = getattr(getattr(agent, "config", None), "temperature", None)
+            response = llm.chat(self._messages(request, agent=agent), temperature=planner_temperature)
             data = extract_json_object(response.content)
         except Exception as exc:
             self.last_warnings.append(f"LLM planner failed: {exc}; using heuristic fallback.")
@@ -650,6 +667,11 @@ Rules:
             complexity = str(data["complexity"])
         limits = clamp_execution_limits(DraftExecutionLimits.for_intent(intent, complexity), data.get("execution_limits"), warnings)
         commands = sanitize_command_candidates(data.get("command_candidates"), warnings=warnings)
+        repo_commands = repo_validation_candidates_for(intent, root=getattr(getattr(agent, "config", None), "root", None))
+        if repo_commands:
+            if commands and repo_commands != commands:
+                warnings.append("Adjusted validation command candidates to match the detected local repository.")
+            commands = repo_commands
         if not commands:
             commands = command_candidates_for(intent)
         phases = self._normalize_phases(data.get("phases"), intent=intent, limits=limits, warnings=warnings)
@@ -745,7 +767,8 @@ Rules:
             command = str(item.get("command") or "")
             if command and command not in commands:
                 safe = sanitize_command_candidates([command], warnings=warnings)
-                command = safe[0] if safe else ""
+                command = ""
+                warnings.append(f"Dropped checkpoint command for `{checkpoint_id}` because it is not in repository-adjusted command candidates.")
             checkpoints.append(
                 DraftCheckpoint(
                     id=checkpoint_id,
@@ -783,7 +806,7 @@ class LoopPlanner:
         intent_type, goal, assumptions, open_questions, complexity = self.intent_analyzer.analyze(request)
         limits = DraftExecutionLimits.for_intent(intent_type, complexity)
         phases = draft_phases_for(intent_type)
-        command_candidates = command_candidates_for(intent_type)
+        command_candidates = repo_validation_candidates_for(intent_type, root=getattr(getattr(agent, "config", None), "root", None))
         checkpoints = checkpoints_for(intent_type, command_candidates, open_questions)
         risks = risks_for(intent_type, open_questions)
         draft_id = time.strftime("draft_%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:8]
@@ -832,6 +855,28 @@ class LoopPlanner:
                 if command not in draft.command_candidates and draft.intent_type == "web_feature":
                     draft.command_candidates.append(command)
         draft.loop_spec = self.synthesizer.synthesize(draft)
+        return draft
+
+    def accept_user_review(self, draft: LoopDraft, confirmation: str) -> LoopDraft:
+        confirmation = normalize_request(confirmation)
+        if not confirmation:
+            raise ValueError("confirmation cannot be empty")
+        draft.revisions.append(f"User review confirmation: {confirmation}")
+        draft.assumptions.append(f"用户已确认/补充：{confirmation}")
+        draft.open_questions = []
+        first_manual_gate_index = len(draft.phases)
+        phase_indexes = {phase.id: idx for idx, phase in enumerate(draft.phases)}
+        for checkpoint in draft.checkpoints:
+            if checkpoint.type == "manual_confirmation" and checkpoint.required:
+                first_manual_gate_index = min(first_manual_gate_index, phase_indexes.get(checkpoint.after_phase, first_manual_gate_index))
+        for phase in draft.phases:
+            phase_index = phase_indexes.get(phase.id, 0)
+            if phase_index >= first_manual_gate_index or (first_manual_gate_index == len(draft.phases) and phase_index >= len(draft.phases) // 2):
+                phase.requires_user_confirmation = True
+        draft.checkpoints = [checkpoint for checkpoint in draft.checkpoints if checkpoint.type != "manual_confirmation"]
+        draft.status = "awaiting_confirmation"
+        draft.loop_spec = self.synthesizer.synthesize(draft)
+        draft.updated_at = time.time()
         return draft
 
     def confirm_draft(self, draft: LoopDraft, *, agent: Any | None = None) -> LoopDraft:
@@ -928,6 +973,36 @@ def sanitize_command_candidates(value: Any, *, warnings: list[str] | None = None
         if command not in result:
             result.append(command)
     return result[:8]
+
+
+def repo_validation_candidates_for(intent_type: str, *, root: Path | None = None) -> list[str]:
+    """Return low-risk validation commands tailored to the current repository.
+
+    The LLM planner may not know whether the local repo is Node, Python, static
+    HTML, or docs-only. This deterministic pass keeps generated LoopSpecs useful
+    out of the box without hardcoding a product workflow: prefer commands that
+    the current repo can actually run, then fall back to intent defaults.
+    """
+
+    if root is None:
+        return command_candidates_for(intent_type)
+    root = Path(root)
+    commands: list[str] = []
+    if root.joinpath("package.json").exists():
+        package_text = root.joinpath("package.json").read_text(encoding="utf-8", errors="replace")[:20000]
+        if '"build"' in package_text:
+            commands.append("npm run build")
+        if '"lint"' in package_text:
+            commands.append("npm run lint")
+        if '"test"' in package_text:
+            commands.append("npm run test")
+    has_pyproject = root.joinpath("pyproject.toml").exists()
+    has_tests = root.joinpath("tests").exists()
+    if has_pyproject or has_tests:
+        if root.joinpath(".venv/bin/python").exists():
+            commands.append(".venv/bin/python -m pytest -q")
+        commands.append("python -m pytest -q")
+    return dedupe(commands or command_candidates_for(intent_type))
 
 
 def clamp_execution_limits(defaults: DraftExecutionLimits, value: Any, warnings: list[str]) -> DraftExecutionLimits:
@@ -1117,6 +1192,10 @@ class LoopDraftSession:
         draft = self.require_draft()
         return self.save(self.planner.revise_draft(draft, feedback))
 
+    def accept_review(self, confirmation: str) -> LoopDraft:
+        draft = self.require_draft()
+        return self.save(self.planner.accept_user_review(draft, confirmation))
+
     def confirm(self, *, agent: Any | None = None) -> LoopDraft:
         draft = self.require_draft()
         return self.save(self.planner.confirm_draft(draft, agent=agent))
@@ -1124,6 +1203,19 @@ class LoopDraftSession:
     def mark_running(self) -> LoopDraft:
         draft = self.require_draft()
         draft.status = "running"
+        return self.save(draft)
+
+    def restore_ready(self) -> LoopDraft:
+        """Return a failed/interrupted execution draft to an executable state.
+
+        Execution failures should not force users to re-confirm an unchanged,
+        already dry-run validated LoopSpec. Keeping the draft ready makes the
+        recovery path obvious: fix the environment/problem and run execute
+        again, or revise the draft if the plan itself needs changing.
+        """
+
+        draft = self.require_draft()
+        draft.status = "ready_to_run"
         return self.save(draft)
 
     def mark_completed(self) -> LoopDraft:
@@ -1232,6 +1324,8 @@ def render_confirmed_draft(draft: LoopDraft) -> str:
     if draft.open_questions:
         lines.append("- Human confirmation required before execution because open questions exist.")
         lines.extend(f"  - {item}" for item in draft.open_questions)
+        lines.append("Next: /loop revise <补充细节> or /loop approve <确认说明> or /loop cancel")
+        return "\n".join(lines)
     if draft.status == "ready_to_run":
         lines.append("- Dry-run: ok")
         lines.append("- Execution: not run")

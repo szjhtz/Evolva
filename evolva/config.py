@@ -10,7 +10,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 LOCAL_RUNTIME_CONFIG_FILE = ROOT / "evolva" / "runtime" / "config.json"
 
-LLM_CONFIG_KEYS = {"api_key", "model", "base_url", "temperature"}
+LLM_CONFIG_KEYS = {"api_key", "model", "base_url", "temperature", "request_timeout"}
 
 
 def load_runtime_config(path: Path = LOCAL_RUNTIME_CONFIG_FILE) -> dict[str, Any]:
@@ -115,6 +115,7 @@ class AgentConfig:
     api_key: str | None = field(default_factory=lambda: _runtime_value("api_key", "OPENAI_API_KEY", None))
     base_url: str = field(default_factory=lambda: _runtime_value("base_url", "OPENAI_BASE_URL", "https://api.openai.com/v1") or "https://api.openai.com/v1")
     temperature: float = field(default_factory=lambda: _runtime_float("temperature", "OPENAI_TEMPERATURE", 0.2))
+    request_timeout: int = int(os.getenv("OPENAI_REQUEST_TIMEOUT", "180"))
     max_steps: int = int(os.getenv("EVOLVA_MAX_STEPS", "8"))
     auto_evolve: bool = os.getenv("EVOLVA_AUTO_EVOLVE", "1") != "0"
 

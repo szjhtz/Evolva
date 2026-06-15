@@ -55,6 +55,31 @@ def test_llm_chat_posts_openai_compatible_payload(monkeypatch, temp_config):
     assert captured["payload"]["model"] == "demo-model"
     assert captured["payload"]["temperature"] == 0.7
     assert captured["headers"]["Authorization"] == "Bearer sk-test"
+    assert captured["timeout"] == cfg.request_timeout
+
+
+def test_llm_chat_accepts_per_request_timeout(monkeypatch, temp_config):
+    cfg = temp_config.__class__(**{**temp_config.__dict__, "api_key": "sk-test"})
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": "hello"}}]}).encode()
+
+    def fake_urlopen(req, timeout):
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    OpenAICompatibleLLM(cfg).chat([{"role": "user", "content": "hi"}], timeout=420)
+
+    assert captured["timeout"] == 420
 
 
 def test_llm_chat_uses_configured_default_temperature(monkeypatch, temp_config):
@@ -79,6 +104,39 @@ def test_llm_chat_uses_configured_default_temperature(monkeypatch, temp_config):
     OpenAICompatibleLLM(cfg).chat([{"role": "user", "content": "hi"}])
 
     assert captured["payload"]["temperature"] == 1.0
+
+
+def test_llm_chat_retries_without_temperature_when_provider_requires_default(monkeypatch, temp_config):
+    cfg = temp_config.__class__(**{**temp_config.__dict__, "api_key": "sk-test", "base_url": "https://llm.example/v1", "temperature": 0.2})
+    payloads = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode()
+
+    class FakeHTTPError(urllib.error.HTTPError):
+        def read(self):
+            return b'{"error":{"message":"Unsupported value: temperature only supports default"}}'
+
+    def fake_urlopen(req, timeout):
+        payloads.append(json.loads(req.data.decode()))
+        if len(payloads) == 1:
+            raise FakeHTTPError(req.full_url, 400, "Bad Request", {}, io.BytesIO())
+        return FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    resp = OpenAICompatibleLLM(cfg).chat([{"role": "user", "content": "hi"}], temperature=0.1)
+
+    assert resp.content == "ok"
+    assert payloads[0]["temperature"] == 0.1
+    assert "temperature" not in payloads[1]
 
 
 def test_llm_chat_surfaces_http_error(monkeypatch, temp_config):

@@ -6,7 +6,7 @@ from argparse import Namespace
 from evolva.agent.core import EvolvaAgent
 from evolva.agent.llm import LLMResponse
 from evolva.cli import build_parser, handle_command, loop_cmd
-from evolva.loops import LoopDraftSession, LoopRegistry, LoopRunner, LoopSpec, render_loop_draft, render_loop_result, render_loop_specs, render_loop_validation, validate_loop_spec
+from evolva.loops import LoopDraftSession, LoopRegistry, LoopRunner, LoopSpec, render_confirmed_draft, render_loop_draft, render_loop_result, render_loop_specs, render_loop_validation, validate_loop_spec
 from evolva.loops.planner import LoopPlanner
 from evolva.tui import EvolvaTUI
 
@@ -22,6 +22,30 @@ class FakeLoopPlannerLLM:
         self.calls.append({"messages": messages, "temperature": temperature})
         content = self.payload if isinstance(self.payload, str) else json.dumps(self.payload, ensure_ascii=False)
         return LLMResponse(content=content)
+
+
+class FakeTransientAgentLLM:
+    available = True
+
+    def __init__(self):
+        self.calls = 0
+
+    def chat(self, messages, *, temperature=None):
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError('LLM HTTP 429: {"error":{"message":"厂商资源池资源不足"}}')
+        return LLMResponse(content='{"final":"retry ok"}')
+
+
+class FakeDirectPhaseLLM:
+    available = True
+
+    def __init__(self):
+        self.calls = []
+
+    def chat(self, messages, *, temperature=None, timeout=None):
+        self.calls.append({"messages": messages, "temperature": temperature, "timeout": timeout})
+        return LLMResponse(content="direct phase deliverable")
 
 
 def llm_loop_payload() -> dict:
@@ -139,6 +163,157 @@ def test_loop_runner_command_gate_executes_command(temp_config):
     assert gate["ok"]
     assert gate["command"] == "python3 -c 'print(123)'"
     assert "123" in gate["output"]
+
+
+def test_loop_runner_agent_phase_requires_llm(temp_config):
+    agent = EvolvaAgent(temp_config, assume_yes=True)
+    spec = LoopSpec.from_dict(
+        {
+            "id": "agent-needs-llm-loop",
+            "phases": [{"id": "plan", "type": "agent", "prompt": "Design a page"}],
+        }
+    )
+    validation = validate_loop_spec(spec, agent=agent, strict_policy=True)
+    assert validation.ok
+    assert any("requires a configured LLM" in warning for warning in validation.warnings)
+
+    result = LoopRunner(agent).run(spec)
+    assert not result.ok
+    assert result.status == "failed"
+    assert "requires a configured LLM" in result.phase_results[0].output
+
+
+def test_loop_runner_agent_phase_retries_transient_llm_error(monkeypatch, temp_config):
+    monkeypatch.setattr("evolva.loops.runner.time.sleep", lambda _: None)
+    agent = EvolvaAgent(temp_config, assume_yes=True)
+    fake_llm = FakeTransientAgentLLM()
+    agent.llm = fake_llm
+    agent.graph_runtime.agent.llm = fake_llm
+    spec = LoopSpec.from_dict(
+        {
+            "id": "agent-retry-loop",
+            "phases": [{"id": "plan", "type": "agent", "prompt": "Design a page"}],
+            "execution_limits": {"max_tool_calls": 3},
+        }
+    )
+
+    result = LoopRunner(agent).run(spec)
+
+    assert result.ok
+    assert result.outputs["plan"] == "retry ok"
+    assert fake_llm.calls == 2
+
+
+def test_loop_runner_uses_direct_llm_for_non_mutating_plan_phases(temp_config):
+    agent = EvolvaAgent(temp_config, assume_yes=True)
+    fake_llm = FakeDirectPhaseLLM()
+    agent.llm = fake_llm  # type: ignore[assignment]
+
+    def should_not_call_chat(*args, **kwargs):
+        raise AssertionError("design_plan should not enter tool-capable agent chat")
+
+    agent.chat = should_not_call_chat  # type: ignore[method-assign]
+    spec = LoopSpec.from_dict(
+        {
+            "id": "direct-plan-loop",
+            "phases": [{"id": "design_plan", "type": "agent", "prompt": "Create a concise plan"}],
+            "execution_limits": {"max_tool_calls": 2},
+        }
+    )
+
+    result = LoopRunner(agent).run(spec)
+
+    assert result.ok
+    assert result.outputs["design_plan"] == "direct phase deliverable"
+    assert fake_llm.calls[0]["timeout"] == 180
+    assert "Do not call tools" in fake_llm.calls[0]["messages"][0]["content"]
+
+
+def test_loop_runner_keeps_implementation_tool_capable(temp_config):
+    agent = EvolvaAgent(temp_config, assume_yes=True)
+    agent.llm = type("LLM", (), {"available": True})()
+    calls = []
+
+    def fake_chat(prompt, **kwargs):
+        from evolva.agent.core import TurnResult
+
+        calls.append({"prompt": prompt, **kwargs})
+        return TurnResult("implemented")
+
+    agent.chat = fake_chat  # type: ignore[method-assign]
+    spec = LoopSpec.from_dict(
+        {
+            "id": "implementation-loop",
+            "phases": [{"id": "implementation", "type": "agent", "prompt": "Implement it", "timeout": 600}],
+            "execution_limits": {"max_file_changes": 1},
+        }
+    )
+
+    result = LoopRunner(agent).run(spec)
+
+    assert result.ok
+    assert calls
+    assert calls[0]["llm_timeout"] == 600
+    assert calls[0]["execution_bounds"].max_file_changes == 1
+
+
+def test_loop_runner_retries_agent_phase_with_failure_context(temp_config):
+    agent = EvolvaAgent(temp_config, assume_yes=True)
+    agent.llm = type("LLM", (), {"available": True})()
+    calls = []
+
+    def fake_chat(prompt, **kwargs):
+        from evolva.agent.core import TurnResult
+
+        calls.append(prompt)
+        if len(calls) == 1:
+            return TurnResult(
+                "Files were written, but validation failed.",
+                tool_logs=["TOOL shell({\"command\": \"printf '--- files ---\\n'\"}) -> ok=False\nprintf: --: invalid option"],
+                failed_tools=["shell"],
+            )
+        return TurnResult("Recovered with portable python3 validation.")
+
+    agent.chat = fake_chat  # type: ignore[method-assign]
+    spec = LoopSpec.from_dict(
+        {
+            "id": "agent-repair-retry-loop",
+            "phases": [{"id": "implementation", "type": "agent", "prompt": "Implement it", "retries": 1}],
+            "execution_limits": {"max_tool_calls": 5},
+        }
+    )
+
+    result = LoopRunner(agent).run(spec)
+
+    assert result.ok
+    assert len(calls) == 2
+    assert "Previous loop phase attempt failed" in calls[1]
+    assert "printf" in calls[1]
+    assert "python3 -c" in calls[1]
+    assert result.phase_results[0].attempt_results[0]["ok"] is False
+    assert "Failed tools: shell" in result.phase_results[0].attempt_results[0]["output"]
+
+
+def test_loop_runner_agent_phase_treats_max_step_stop_as_failure(temp_config):
+    agent = EvolvaAgent(temp_config, assume_yes=True)
+    spec = LoopSpec.from_dict(
+        {
+            "id": "agent-step-limit-loop",
+            "phases": [{"id": "plan", "type": "agent", "prompt": "Design a page"}],
+        }
+    )
+
+    def stopped_chat(prompt):
+        from evolva.agent.core import TurnResult
+
+        return TurnResult("达到最大执行步数，已停止。", stopped_by_limit=True)
+
+    agent.llm = type("LLM", (), {"available": True})()
+    agent.chat = stopped_chat  # type: ignore[method-assign]
+    result = LoopRunner(agent).run(spec)
+
+    assert not result.ok
+    assert result.phase_results[0].output.startswith("达到最大执行步数")
 
 
 def test_loop_runner_retries_failed_phase_and_records_attempts(temp_config):
@@ -346,10 +521,59 @@ def test_loop_planner_uses_llm_first_and_sanitizes_output(temp_config):
     assert "npm run build" in draft.command_candidates
     assert all("rm" not in command and "git push" not in command for command in draft.command_candidates)
     assert any("Dropped unsafe command" in warning for warning in draft.planner_warnings)
+    assert any("Adjusted validation command" in warning for warning in draft.planner_warnings)
     assert any(phase.id == "product_design" for phase in draft.loop_spec.phases)
     assert any(phase.id == "visual_acceptance" for phase in draft.loop_spec.phases)
     rendered = render_loop_draft(draft)
     assert "Planner: llm" in rendered
+
+
+def test_loop_prompts_include_previous_outputs(temp_config):
+    agent = EvolvaAgent(temp_config, assume_yes=True)
+    fake_llm = FakeLoopPlannerLLM(llm_loop_payload())
+    agent.llm = fake_llm  # type: ignore[assignment]
+
+    draft = LoopPlanner().create_draft("做一个响应式 landing page，有 hero、pricing、FAQ", agent=agent)
+    implementation = next(phase for phase in draft.loop_spec.phases if phase.id == "implementation")
+
+    assert "Previous phase outputs:" in implementation.prompt
+    assert "{{product_design}}" in implementation.prompt
+    assert "finish with final" in implementation.prompt
+
+
+def test_loop_planner_prefers_repo_validation_commands_for_non_node_repo(temp_config):
+    (temp_config.root / "pyproject.toml").write_text("[project]\nname='sample'\n", encoding="utf-8")
+    (temp_config.root / "tests").mkdir()
+    agent = EvolvaAgent(temp_config, assume_yes=True)
+    fake_llm = FakeLoopPlannerLLM(llm_loop_payload())
+    agent.llm = fake_llm  # type: ignore[assignment]
+
+    draft = LoopPlanner().create_draft("做一个完整的网页", agent=agent)
+    verification = next(phase for phase in draft.loop_spec.phases if phase.type == "tool" and phase.tool == "shell")
+
+    assert verification.args["command"] == "python -m pytest -q"
+    assert "npm run build" not in draft.loop_spec.command_allowlist
+    assert all(gate.command != "npm run build" for gate in draft.loop_spec.gates)
+
+
+def test_accept_review_clears_open_questions_and_marks_execution_phases_confirmed(temp_config):
+    agent = EvolvaAgent(temp_config, assume_yes=True)
+    session = LoopDraftSession.for_agent(agent)
+    draft = session.plan("做一个完整的网页", agent=agent)
+    draft.open_questions = ["网页主题是什么？"]
+    session.save(draft)
+
+    blocked = session.confirm(agent=agent)
+    assert blocked.status == "needs_user_review"
+    assert "/loop approve" in render_confirmed_draft(blocked)
+
+    accepted = session.accept_review("做产品官网 landing page，使用占位素材，完整响应式。")
+    assert accepted.open_questions == []
+    assert any(phase.requires_user_confirmation for phase in accepted.phases if phase.id == "implementation")
+    implementation = next(phase for phase in accepted.loop_spec.phases if phase.id == "implementation")
+    assert "follows user confirmation" in implementation.prompt
+    ready = session.confirm(agent=agent)
+    assert ready.status == "ready_to_run"
 
 
 def test_loop_planner_falls_back_when_llm_json_invalid(temp_config):
@@ -487,6 +711,18 @@ def test_cli_and_tui_loop_commands(monkeypatch, capsys, temp_config):
     assert "Saved Loop spec" in capsys.readouterr().out
     assert loop_cmd(Namespace(loop_cmd="cancel", yes=True)) == 0
     assert "Cancelled" in capsys.readouterr().out
+
+
+def test_loop_execute_restores_ready_status_after_failure(monkeypatch, capsys, temp_config):
+    monkeypatch.setattr("evolva.cli.AgentConfig", lambda: temp_config)
+    assert loop_cmd(Namespace(loop_cmd="plan", request=["做一个完整的网页"], show_spec=False, yes=True)) == 0
+    assert loop_cmd(Namespace(loop_cmd="confirm", yes=True)) == 0
+
+    code = loop_cmd(Namespace(loop_cmd="execute", json=False, yes=True))
+    assert code == 1
+    out = capsys.readouterr().out
+    assert "requires a configured LLM" in out
+    assert LoopDraftSession.for_agent(EvolvaAgent(temp_config, assume_yes=True)).require_draft().status == "ready_to_run"
 
     agent = EvolvaAgent(temp_config, assume_yes=True)
     assert handle_command(agent, "/loop 做一个响应式 landing page") is True

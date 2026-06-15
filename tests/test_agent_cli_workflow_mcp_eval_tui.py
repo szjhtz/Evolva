@@ -58,7 +58,8 @@ def test_agent_uses_langgraph_runtime_for_llm_tool_loop(temp_config):
     class FakeLLM:
         available = True
 
-        def chat(self, messages):
+        def chat(self, messages, *, timeout=None):
+            assert timeout == temp_config.request_timeout
             return type("Resp", (), {"content": json.dumps(next(responses))})()
 
     agent.llm = FakeLLM()
@@ -85,6 +86,7 @@ def test_agent_auto_evolve_records_report_in_trace_and_context(temp_config):
     result = agent.chat("run missing tool")
 
     assert result.failed_tools == ["missing"]
+    assert result.stopped_by_limit
     run_id = agent.tracer.list_runs(limit=1)[0]["run_id"]
     trace = agent.tracer.load(run_id)
     events = [event for event in trace["events"] if event["kind"] == "auto_evolve"]

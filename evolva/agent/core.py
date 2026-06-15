@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -52,6 +53,13 @@ class TurnResult:
     answer: str
     tool_logs: list[str] = field(default_factory=list)
     failed_tools: list[str] = field(default_factory=list)
+    stopped_by_limit: bool = False
+
+
+@dataclass(frozen=True)
+class AgentExecutionBounds:
+    max_file_changes: int | None = None
+    baseline_modified_files: frozenset[str] = field(default_factory=frozenset)
 
 
 class EvolvaAgent:
@@ -145,7 +153,13 @@ class EvolvaAgent:
         report = engine.run(trace_limit=limit, apply=apply)
         return engine.render(report), report.to_dict()
 
-    def chat(self, user_message: str, image_sources: list[str] | None = None) -> TurnResult:
+    def chat(
+        self,
+        user_message: str,
+        image_sources: list[str] | None = None,
+        llm_timeout: int | None = None,
+        execution_bounds: AgentExecutionBounds | None = None,
+    ) -> TurnResult:
         meta = {
             "runtime": "langgraph",
             "graph_nodes": self.graph_nodes(),
@@ -174,19 +188,63 @@ class EvolvaAgent:
                 self.tracer.event("agent_chat_end", {"status": "fallback", "answer": result.answer[:4000]})
             return result
 
-        state = self.graph_runtime.run(user_message, image_sources=image_sources)
+        state = self.graph_runtime.run(user_message, image_sources=image_sources, llm_timeout=llm_timeout, execution_bounds=execution_bounds)
         final = state.get("final", "")
         failed_tools = state.get("failed_tools", [])
-        status = "completed" if not failed_tools else "completed_with_tool_failures"
+        stopped_by_limit = bool(state.get("stopped_by_limit", False))
+        status = "stopped_by_limit" if stopped_by_limit else "completed" if not failed_tools else "completed_with_tool_failures"
         if owns_trace:
             self.tracer.end(final, status=status)
         else:
             self.tracer.event("agent_chat_end", {"status": status, "answer": final[:4000], "failed_tools": failed_tools})
-        return TurnResult(answer=final, tool_logs=state.get("tool_logs", []), failed_tools=failed_tools)
+        return TurnResult(answer=final, tool_logs=state.get("tool_logs", []), failed_tools=failed_tools, stopped_by_limit=stopped_by_limit)
 
     def graph_nodes(self) -> list[str]:
         """Return the explicit LangGraph node names used by the runtime."""
         return ["prepare", "llm", "tool", "observe", "persist", "auto_evolve"]
+
+    def count_modified_files(self) -> int:
+        return len(self.modified_file_paths())
+
+    def modified_file_paths(self) -> set[str]:
+        """Best-effort count of files changed under the sandbox root.
+
+        Prefer Git when available because it captures modifications, additions,
+        deletions, renames, and untracked files consistently. Fall back to zero
+        for non-git workspaces rather than blocking legitimate local tasks.
+        """
+
+        try:
+            import subprocess
+
+            proc = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=self.config.root,
+                text=True,
+                capture_output=True,
+                timeout=10,
+            )
+        except Exception:
+            return set()
+        if proc.returncode != 0:
+            return set()
+        paths: set[str] = set()
+        for line in proc.stdout.splitlines():
+            if not line:
+                continue
+            raw_path = line[3:] if len(line) > 3 else line
+            if " -> " in raw_path:
+                raw_path = raw_path.split(" -> ", 1)[1]
+            raw_path = raw_path.strip().strip('"')
+            if not raw_path:
+                continue
+            try:
+                resolved = (self.config.root / raw_path).resolve()
+                resolved.relative_to(Path(self.config.root).resolve())
+            except Exception:
+                continue
+            paths.add(raw_path)
+        return paths
 
     def _messages(self, user_message: str, scratch: str, image_sources: list[str] | None = None) -> list[dict[str, Any]]:
         context = (

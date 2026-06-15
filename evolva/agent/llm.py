@@ -25,15 +25,17 @@ class OpenAICompatibleLLM:
     def available(self) -> bool:
         return bool(self.config.api_key)
 
-    def chat(self, messages: list[dict[str, Any]], *, temperature: float | None = None) -> LLMResponse:
+    def chat(self, messages: list[dict[str, Any]], *, temperature: float | None = None, timeout: int | None = None) -> LLMResponse:
         if not self.available:
             raise RuntimeError("OPENAI_API_KEY is not configured")
         url = self.config.base_url.rstrip("/") + "/chat/completions"
         payload = {
             "model": self.config.model,
             "messages": messages,
-            "temperature": self.config.temperature if temperature is None else temperature,
         }
+        resolved_temperature = self.config.temperature if temperature is None else temperature
+        if resolved_temperature is not None:
+            payload["temperature"] = resolved_temperature
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
             url,
@@ -44,14 +46,44 @@ class OpenAICompatibleLLM:
             },
             method="POST",
         )
+        request_timeout = timeout or getattr(self.config, "request_timeout", 180)
         try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
+            with urllib.request.urlopen(req, timeout=request_timeout) as resp:
                 raw = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
+            if payload.get("temperature") is not None and self._temperature_must_be_default(exc.code, body):
+                payload.pop("temperature", None)
+                retry_req = urllib.request.Request(
+                    url,
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={
+                        "Authorization": f"Bearer {self.config.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    method="POST",
+                )
+                try:
+                    with urllib.request.urlopen(retry_req, timeout=request_timeout) as resp:
+                        raw = json.loads(resp.read().decode("utf-8"))
+                except urllib.error.HTTPError as retry_exc:
+                    retry_body = retry_exc.read().decode("utf-8", errors="replace")
+                    raise RuntimeError(f"LLM HTTP {retry_exc.code}: {retry_body}") from retry_exc
+                except Exception:
+                    raise
+                else:
+                    content = raw["choices"][0]["message"]["content"]
+                    return LLMResponse(content=content, raw=raw)
             raise RuntimeError(f"LLM HTTP {exc.code}: {body}") from exc
         content = raw["choices"][0]["message"]["content"]
         return LLMResponse(content=content, raw=raw)
+
+    @staticmethod
+    def _temperature_must_be_default(status_code: int, body: str) -> bool:
+        if status_code != 400:
+            return False
+        lowered = body.lower()
+        return "temperature" in lowered and ("unsupported" in lowered or "default" in lowered)
 
 
 def extract_json_object(text: str) -> dict[str, Any] | None:

@@ -67,6 +67,7 @@ Commands:
   /loop run <loop>     Run a loop and record trace evidence
   /loop <request>      Plan a new Loop from natural language; does not execute
   /loop revise <text>  Revise the active draft
+  /loop approve <text> Resolve open questions with a confirmation note
   /loop confirm        Validate/dry-run active draft
   /loop execute        Execute only after confirm succeeds
   /loop save <name>    Save active draft as reusable Loop
@@ -267,7 +268,7 @@ def handle_command(agent: EvolvaAgent, line: str) -> bool:
             print(render_loop_specs(runner.list_specs()))
             return True
         if rest == "help":
-            print("Usage: /loop <request> | /loop plan <request> | /loop revise <feedback> | /loop show-draft | /loop confirm | /loop execute | /loop save <name> | /loop cancel | /loop list/show/validate/dry-run/run")
+            print("Usage: /loop <request> | /loop plan <request> | /loop revise <feedback> | /loop approve <confirmation> | /loop show-draft | /loop confirm | /loop execute | /loop save <name> | /loop cancel | /loop list/show/validate/dry-run/run")
             return True
         if is_natural_language_loop(rest) or rest.startswith("plan "):
             request = rest.removeprefix("plan ").strip() if rest.startswith("plan ") else rest
@@ -278,6 +279,11 @@ def handle_command(agent: EvolvaAgent, line: str) -> bool:
             return True
         if rest.startswith("revise "):
             print(render_loop_draft(session.revise(rest.removeprefix("revise ").strip())))
+            return True
+        if rest.startswith("approve") or rest.startswith("accept"):
+            parts = rest.split(maxsplit=1)
+            confirmation = parts[1].strip() if len(parts) > 1 else "用户确认按当前默认方案继续执行。"
+            print(render_loop_draft(session.accept_review(confirmation)))
             return True
         if rest == "confirm":
             print(render_confirmed_draft(session.confirm(agent=agent)))
@@ -291,6 +297,8 @@ def handle_command(agent: EvolvaAgent, line: str) -> bool:
             result = runner.run(draft.loop_spec)
             if result.ok:
                 session.mark_completed()
+            else:
+                session.restore_ready()
             print(render_loop_result(result))
             return True
         if rest.startswith("save"):
@@ -322,7 +330,7 @@ def handle_command(agent: EvolvaAgent, line: str) -> bool:
         if rest.startswith("run "):
             print(render_loop_result(runner.run(rest.removeprefix("run ").strip())))
             return True
-        print("Usage: /loop <request> | /loop plan <request> | /loop revise <feedback> | /loop show-draft | /loop confirm | /loop execute | /loop save <name> | /loop cancel | /loop list/show/validate/dry-run/run")
+        print("Usage: /loop <request> | /loop plan <request> | /loop revise <feedback> | /loop approve <confirmation> | /loop show-draft | /loop confirm | /loop execute | /loop save <name> | /loop cancel | /loop list/show/validate/dry-run/run")
         return True
     if line.startswith("/workflow"):
         path = line.removeprefix("/workflow").strip()
@@ -547,6 +555,10 @@ def loop_cmd(args: argparse.Namespace) -> int:
         draft = session.revise(_loop_text(args, "feedback"))
         print(render_loop_draft(draft, show_spec=args.show_spec))
         return 0
+    if args.loop_cmd in {"approve", "accept"}:
+        draft = session.accept_review(_loop_text(args, "confirmation") or "用户确认按当前默认方案继续执行。")
+        print(render_loop_draft(draft, show_spec=args.show_spec))
+        return 0
     if args.loop_cmd == "confirm":
         draft = session.confirm(agent=agent)
         print(render_confirmed_draft(draft))
@@ -560,6 +572,8 @@ def loop_cmd(args: argparse.Namespace) -> int:
         result = runner.run(draft.loop_spec)
         if result.ok:
             session.mark_completed()
+        else:
+            session.restore_ready()
         if args.json:
             print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
         else:
@@ -728,6 +742,14 @@ def build_parser() -> argparse.ArgumentParser:
     loop_revise.add_argument("--show-spec", action="store_true", help="Include generated LoopSpec JSON")
     loop_revise.add_argument("feedback", nargs="+")
     loop_revise.set_defaults(func=loop_cmd)
+    loop_approve = loop_sub.add_parser("approve", help="Resolve open questions with a user confirmation note")
+    loop_approve.add_argument("--show-spec", action="store_true", help="Include generated LoopSpec JSON")
+    loop_approve.add_argument("confirmation", nargs="*")
+    loop_approve.set_defaults(func=loop_cmd)
+    loop_accept = loop_sub.add_parser("accept", help=argparse.SUPPRESS)
+    loop_accept.add_argument("--show-spec", action="store_true", help=argparse.SUPPRESS)
+    loop_accept.add_argument("confirmation", nargs="*")
+    loop_accept.set_defaults(func=loop_cmd)
     loop_confirm = loop_sub.add_parser("confirm", help="Validate/dry-run the active generated Loop draft")
     loop_confirm.set_defaults(func=loop_cmd)
     loop_execute = loop_sub.add_parser("execute", help="Execute the active generated Loop after confirm")

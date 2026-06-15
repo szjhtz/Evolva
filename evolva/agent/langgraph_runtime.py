@@ -17,10 +17,13 @@ class EvolvaGraphState(TypedDict, total=False):
     final: str
     tool_logs: list[str]
     failed_tools: list[str]
+    stopped_by_limit: bool
     last_action: dict[str, Any] | None
     last_tool_name: str | None
     last_tool_args: dict[str, Any]
     route: str
+    llm_timeout: int
+    execution_bounds: Any
 
 
 class EvolvaLangGraphRuntime:
@@ -38,7 +41,13 @@ class EvolvaLangGraphRuntime:
         self.agent = agent
         self.graph = self._build_graph()
 
-    def run(self, user_message: str, image_sources: list[str] | None = None) -> EvolvaGraphState:
+    def run(
+        self,
+        user_message: str,
+        image_sources: list[str] | None = None,
+        llm_timeout: int | None = None,
+        execution_bounds: Any | None = None,
+    ) -> EvolvaGraphState:
         initial: EvolvaGraphState = {
             "user_message": user_message,
             "image_sources": image_sources or [],
@@ -47,11 +56,16 @@ class EvolvaLangGraphRuntime:
             "final": "",
             "tool_logs": [],
             "failed_tools": [],
+            "stopped_by_limit": False,
             "last_action": None,
             "last_tool_name": None,
             "last_tool_args": {},
             "route": "llm",
         }
+        if llm_timeout is not None:
+            initial["llm_timeout"] = int(llm_timeout)
+        if execution_bounds is not None:
+            initial["execution_bounds"] = execution_bounds
         return self.graph.invoke(initial)
 
     def _build_graph(self):
@@ -88,7 +102,13 @@ class EvolvaLangGraphRuntime:
             {"node": "llm", "step": step, "scratch_chars": len(scratch)},
         )
         self.agent.tracer.event("prompt", {"message_count": len(messages), "scratch_chars": len(scratch), "system_chars": len(messages[0]["content"])})
-        raw = self.agent.llm.chat(messages).content
+        timeout = int(state.get("llm_timeout") or getattr(self.agent.config, "request_timeout", 180))
+        try:
+            raw = self.agent.llm.chat(messages, timeout=timeout).content
+        except TypeError as exc:
+            if "timeout" not in str(exc):
+                raise
+            raw = self.agent.llm.chat(messages).content
         self.agent.tracer.event("llm_response", {"raw": raw[:4000]})
         action = extract_json_object(raw)
         if not action:
@@ -119,6 +139,17 @@ class EvolvaLangGraphRuntime:
         failed_tools = list(state.get("failed_tools", []))
         if not result.ok:
             failed_tools.append(name)
+        bounds = state.get("execution_bounds")
+        if bounds and bounds.max_file_changes is not None and name in {"write_file", "shell", "python_exec"}:
+            baseline = set(getattr(bounds, "baseline_modified_files", frozenset()) or [])
+            current = self.agent.modified_file_paths() if hasattr(self.agent, "modified_file_paths") else set()
+            changed = len(current - baseline)
+            if changed > bounds.max_file_changes:
+                failed_tools.append(name)
+                over_budget = f"Loop execution budget exceeded: max_file_changes={bounds.max_file_changes} exceeded after `{name}` ({changed} changed files)."
+                log += f"\n{over_budget}"
+                tool_logs[-1] = log
+                result = ToolResult(False, f"{result.output}\n{over_budget}", result.data)
         scratch = (state.get("scratch") or "") + "\n" + log[:4000]
         return {"tool_logs": tool_logs, "failed_tools": failed_tools, "scratch": scratch}
 
@@ -128,7 +159,7 @@ class EvolvaLangGraphRuntime:
         if step >= self.agent.config.max_steps:
             tool_logs = state.get("tool_logs", [])
             final = "达到最大执行步数，已停止。已完成的工具结果如下：\n" + "\n".join(tool_logs[-3:])
-            return {"final": final, "route": "persist"}
+            return {"final": final, "route": "persist", "stopped_by_limit": True}
         return {"route": "llm"}
 
     def _route_after_observe(self, state: EvolvaGraphState) -> Literal["llm", "persist"]:

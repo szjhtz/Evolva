@@ -495,7 +495,7 @@ class EvolvaTUI:
                 if rest in {"", "list"}:
                     self._add_system(render_loop_specs(runner.list_specs()))
                 elif rest == "help":
-                    self._add_system("Usage: /loop <request> | /loop plan <request> | /loop revise <feedback> | /loop show-draft | /loop confirm | /loop execute | /loop save <name> | /loop cancel | /loop list/show/validate/dry-run/run")
+                    self._add_system("Usage: /loop <request> | /loop plan <request> | /loop revise <feedback> | /loop approve <confirmation> | /loop show-draft | /loop confirm | /loop execute | /loop save <name> | /loop cancel | /loop list/show/validate/dry-run/run")
                 elif is_natural_language_loop(rest) or rest.startswith("plan "):
                     request = rest.removeprefix("plan ").strip() if rest.startswith("plan ") else rest
                     self._add_system(render_loop_draft(session.plan(request, agent=self.agent)))
@@ -503,6 +503,10 @@ class EvolvaTUI:
                     self._add_system(render_loop_draft(session.require_draft(), show_spec=True))
                 elif rest.startswith("revise "):
                     self._add_system(render_loop_draft(session.revise(rest.removeprefix("revise ").strip())))
+                elif rest.startswith("approve") or rest.startswith("accept"):
+                    parts = rest.split(maxsplit=1)
+                    confirmation = parts[1].strip() if len(parts) > 1 else "用户确认按当前默认方案继续执行。"
+                    self._add_system(render_loop_draft(session.accept_review(confirmation)))
                 elif rest == "confirm":
                     self._add_system(render_confirmed_draft(session.confirm(agent=self.agent)))
                 elif rest == "execute":
@@ -513,7 +517,7 @@ class EvolvaTUI:
                         session.mark_running()
                         self.busy = True
                         self.status = "Running generated loop..."
-                        thread = threading.Thread(target=self._worker_loop_spec, args=(draft.loop_spec,), daemon=True)
+                        thread = threading.Thread(target=self._worker_loop_spec, args=(draft.loop_spec, session), daemon=True)
                         thread.start()
                 elif rest.startswith("save"):
                     path = session.save_loop(rest.removeprefix("save").strip())
@@ -542,7 +546,7 @@ class EvolvaTUI:
                     thread = threading.Thread(target=self._worker_loop, args=(rest.removeprefix("run ").strip(),), daemon=True)
                     thread.start()
                 else:
-                    self._add_system("Usage: /loop <request> | /loop plan <request> | /loop revise <feedback> | /loop show-draft | /loop confirm | /loop execute | /loop save <name> | /loop cancel | /loop list/show/validate/dry-run/run")
+                    self._add_system("Usage: /loop <request> | /loop plan <request> | /loop revise <feedback> | /loop approve <confirmation> | /loop show-draft | /loop confirm | /loop execute | /loop save <name> | /loop cancel | /loop list/show/validate/dry-run/run")
             elif line.startswith("/workflow"):
                 rest = line.removeprefix("/workflow").strip()
                 if not rest:
@@ -760,16 +764,27 @@ class EvolvaTUI:
         except Exception as exc:
             self.queue.put(("error", f"Loop error: {exc}"))
 
-    def _worker_loop_spec(self, spec: Any) -> None:
+    def _worker_loop_spec(self, spec: Any, session: LoopDraftSession | None = None) -> None:
         try:
             result = LoopRunner(self.agent).run(spec)
+            draft_session = session or LoopDraftSession.for_agent(self.agent)
             if result.ok:
                 try:
-                    LoopDraftSession.for_agent(self.agent).mark_completed()
+                    draft_session.mark_completed()
+                except Exception:
+                    pass
+            else:
+                try:
+                    draft_session.restore_ready()
                 except Exception:
                     pass
             self.queue.put(("loop_result", result))
         except Exception as exc:
+            if session is not None:
+                try:
+                    session.restore_ready()
+                except Exception:
+                    pass
             self.queue.put(("error", f"Loop error: {exc}"))
 
     def _worker_workflow(self, path: str) -> None:

@@ -3,15 +3,32 @@ from __future__ import annotations
 import json
 import shlex
 import time
+import urllib.error
 from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
 from evolva.agent.dream import DreamEngine
+from evolva.agent.core import AgentExecutionBounds
+from evolva.agent.llm import LLMResponse, extract_json_object
 from evolva.loops.registry import LoopRegistry
 from evolva.loops.spec import LoopGate, LoopPhase, LoopPhaseResult, LoopRunResult, LoopSpec
 from evolva.tools.base import ToolResult
+
+
+DIRECT_LLM_PHASE_IDS = {
+    "analysis",
+    "design_plan",
+    "product_design",
+    "implementation_plan",
+    "requirements_clarification",
+    "visual_acceptance",
+    "ux_review",
+    "final_report",
+}
+
+TOOL_HEAVY_PHASE_IDS = {"context_scan", "implementation", "repair_if_needed"}
 
 
 class LoopRunner:
@@ -158,13 +175,14 @@ class LoopRunner:
         final_output = ""
         final_artifacts: list[dict[str, Any]] = []
         final_ended = started
+        retry_context = ""
         for attempt in range(1, max_attempts + 1):
             attempt_started = time.time()
             budget_error = budget.check_before_attempt(phase)
             if budget_error:
                 ok, output, artifacts = False, f"Loop execution budget exceeded: {budget_error}", []
             else:
-                ok, output, artifacts = self._run_phase_once(phase, outputs, spec, budget)
+                ok, output, artifacts = self._run_phase_once(phase, outputs, spec, budget, retry_context=retry_context)
             attempt_ended = time.time()
             attempts.append(
                 {
@@ -185,6 +203,7 @@ class LoopRunner:
             if budget.last_error:
                 break
             if attempt < max_attempts:
+                retry_context = self._retry_context_for_phase(phase, attempt=attempt, output=output)
                 self.agent.tracer.event(
                     "loop_phase_retry",
                     {"phase_id": phase.id, "attempt": attempt, "max_attempts": max_attempts, "output": output[:1000]},
@@ -201,7 +220,15 @@ class LoopRunner:
             artifacts=final_artifacts,
         )
 
-    def _run_phase_once(self, phase: LoopPhase, outputs: dict[str, str], spec: LoopSpec, budget: "LoopExecutionBudget") -> tuple[bool, str, list[dict[str, Any]]]:
+    def _run_phase_once(
+        self,
+        phase: LoopPhase,
+        outputs: dict[str, str],
+        spec: LoopSpec,
+        budget: "LoopExecutionBudget",
+        *,
+        retry_context: str = "",
+    ) -> tuple[bool, str, list[dict[str, Any]]]:
         try:
             if phase.type == "tool":
                 budget_error = budget.register_tool_phase(phase)
@@ -223,10 +250,21 @@ class LoopRunner:
                 if budget_error:
                     return False, f"{output}\nLoop execution budget exceeded: {budget_error}".strip(), artifacts
             elif phase.type == "agent":
+                if getattr(getattr(self.agent, "llm", None), "available", False) is False:
+                    return False, "Agent phase requires a configured LLM. Configure OPENAI_API_KEY (or an OpenAI-compatible provider) before executing generated engineering loops.", []
+                budget_error = budget.register_tool_call("agent_llm")
+                if budget_error:
+                    return False, f"Loop execution budget exceeded: {budget_error}", []
                 prompt = str(self._render(phase.prompt, outputs))
-                turn = self.agent.chat(prompt)
-                ok = not turn.failed_tools
-                output = turn.answer
+                if retry_context:
+                    prompt = f"{prompt}\n\n{retry_context}"
+                if self._should_use_direct_llm(phase):
+                    output = self._direct_llm_with_retry(prompt, phase=phase, outputs=outputs)
+                    ok = bool(output.strip())
+                else:
+                    turn = self._chat_with_retry(prompt, phase=phase, spec=spec)
+                    ok = bool(turn.answer.strip()) and not turn.failed_tools and not getattr(turn, "stopped_by_limit", False)
+                    output = turn.answer if ok else self._format_failed_agent_turn(turn)
                 artifacts = []
             elif phase.type == "role":
                 budget_error = budget.register_tool_call("delegate_agent")
@@ -251,6 +289,199 @@ class LoopRunner:
             ok, output = False, f"Loop phase error: {exc}"
             artifacts = []
         return ok, output, artifacts
+
+    @staticmethod
+    def _format_failed_agent_turn(turn: Any) -> str:
+        """Keep enough failed-agent evidence for retry prompts and run reports.
+
+        The regular chat API returns a final answer even when one or more tools
+        failed. Loop phases are stricter: a tool-capable phase is not complete
+        until the model has recovered from failed tools. Preserve the failed tool
+        names and recent logs so the next retry can fix the concrete failure
+        instead of repeating the same brittle command or stopping at a vague
+        final answer.
+        """
+
+        parts: list[str] = []
+        answer = str(getattr(turn, "answer", "") or "").strip()
+        if answer:
+            parts.append(answer)
+        failed_tools = [str(item) for item in getattr(turn, "failed_tools", []) or []]
+        stopped_by_limit = bool(getattr(turn, "stopped_by_limit", False))
+        if failed_tools:
+            parts.append("Failed tools: " + ", ".join(failed_tools))
+        if stopped_by_limit:
+            parts.append("Stopped by max step limit before the phase completed.")
+        logs = [str(item) for item in getattr(turn, "tool_logs", []) or []]
+        if logs:
+            parts.append("Recent tool logs:\n" + "\n\n".join(logs[-3:])[-6000:])
+        return "\n\n".join(parts).strip() or "Agent phase failed without a final answer."
+
+    @staticmethod
+    def _retry_context_for_phase(phase: LoopPhase, *, attempt: int, output: str) -> str:
+        guidance = [
+            "Previous loop phase attempt failed; this is an automatic repair retry.",
+            f"Phase id: {phase.id}; failed attempt: {attempt}.",
+            "Do not repeat the exact failed action. Use the failure evidence below to make the smallest safe correction.",
+            "If a shell validation command failed because of portability or quoting, rerun a simpler portable check instead.",
+            "Prefer `echo` for headings and `python3 -c` for deterministic static validation; avoid `printf` formats that begin with '-' and avoid shell-specific constructs.",
+            "Finish only when the phase's expected deliverable is complete and validation evidence is available; otherwise report the blocker clearly.",
+            "Failure evidence from previous attempt:",
+            output[-6000:],
+        ]
+        return "\n".join(guidance)
+
+    @staticmethod
+    def _should_use_direct_llm(phase: LoopPhase) -> bool:
+        if phase.id in TOOL_HEAVY_PHASE_IDS:
+            return False
+        if phase.id in DIRECT_LLM_PHASE_IDS:
+            return True
+        if phase.id in {"plan", "planning"}:
+            return False
+        lowered = f"{phase.id} {phase.name} {phase.prompt}".lower()
+        if any(marker in lowered for marker in ("implement", "write_file", "edit", "修改", "实施", "实现", "读取", "扫描", "inspect")):
+            return False
+        return any(marker in lowered for marker in ("design", "review", "report", "验收", "复核", "总结", "设计"))
+
+    def _direct_llm_with_retry(self, prompt: str, *, phase: LoopPhase, outputs: dict[str, str]) -> str:
+        last_exc: Exception | None = None
+        timeout = self._llm_timeout_for_phase(phase)
+        messages = self._direct_llm_messages(prompt, phase=phase, outputs=outputs)
+        for attempt in range(3):
+            try:
+                response = self.agent.llm.chat(messages, timeout=timeout)
+                content = response.content if isinstance(response, LLMResponse) else str(getattr(response, "content", response))
+                self.agent.tracer.event("loop_direct_llm", {"phase_id": phase.id, "attempt": attempt + 1, "chars": len(content)})
+                return self._normalize_direct_llm_content(content)
+            except TypeError as exc:
+                if "timeout" not in str(exc):
+                    raise
+                try:
+                    response = self.agent.llm.chat(messages)
+                except Exception as fallback_exc:
+                    last_exc = fallback_exc
+                    if not self._is_transient_llm_error(fallback_exc) or attempt == 2:
+                        raise
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                content = response.content if isinstance(response, LLMResponse) else str(getattr(response, "content", response))
+                self.agent.tracer.event("loop_direct_llm", {"phase_id": phase.id, "attempt": attempt + 1, "chars": len(content), "timeout_arg": "unsupported"})
+                return self._normalize_direct_llm_content(content)
+            except Exception as exc:
+                last_exc = exc
+                if not self._is_transient_llm_error(exc) or attempt == 2:
+                    raise
+                time.sleep(1.5 * (attempt + 1))
+        raise last_exc or RuntimeError("LLM phase failed")
+
+    @staticmethod
+    def _normalize_direct_llm_content(content: str) -> str:
+        action = extract_json_object(content)
+        if isinstance(action, dict) and action.get("final"):
+            return str(action["final"]).strip()
+        return content.strip()
+
+    @staticmethod
+    def _direct_llm_messages(prompt: str, *, phase: LoopPhase, outputs: dict[str, str]) -> list[dict[str, Any]]:
+        compact_outputs = {key: value[-3000:] for key, value in outputs.items()}
+        system = (
+            "You are executing a non-mutating Evolva Loop phase. "
+            "Return the phase deliverable directly in concise Markdown. "
+            "Do not call tools, do not emit tool JSON, do not create todos, and do not claim to have changed files. "
+            "Use the provided previous phase outputs as evidence. If information is insufficient, state the blocker and the exact question."
+        )
+        user = (
+            f"Phase id: {phase.id}\n"
+            f"Phase name: {phase.name or phase.id}\n\n"
+            f"Prompt:\n{prompt}\n\n"
+            "Previous phase outputs JSON (truncated):\n"
+            f"{json.dumps(compact_outputs, ensure_ascii=False, indent=2)}"
+        )
+        return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+    def _chat_with_retry(self, prompt: str, *, phase: LoopPhase, spec: LoopSpec) -> Any:
+        last_exc: Exception | None = None
+        max_steps = self._max_steps_for_phase(phase)
+        timeout = self._llm_timeout_for_phase(phase)
+        bounds = self._execution_bounds_with_baseline(spec)
+        for attempt in range(3):
+            try:
+                return self._chat_with_step_budget(prompt, max_steps=max_steps, timeout=timeout, execution_bounds=bounds)
+            except Exception as exc:
+                last_exc = exc
+                if not self._is_transient_llm_error(exc) or attempt == 2:
+                    raise
+                time.sleep(1.5 * (attempt + 1))
+        raise last_exc or RuntimeError("LLM chat failed")
+
+    def _chat_with_step_budget(
+        self,
+        prompt: str,
+        *,
+        max_steps: int | None = None,
+        timeout: int | None = None,
+        execution_bounds: AgentExecutionBounds | None = None,
+    ) -> Any:
+        if max_steps is None or max_steps <= self.agent.config.max_steps:
+            return self._agent_chat(prompt, timeout=timeout, execution_bounds=execution_bounds)
+        original_config = self.agent.config
+        try:
+            from dataclasses import replace
+
+            self.agent.config = replace(self.agent.config, max_steps=max_steps)
+            return self._agent_chat(prompt, timeout=timeout, execution_bounds=execution_bounds)
+        finally:
+            self.agent.config = original_config
+
+    def _agent_chat(self, prompt: str, *, timeout: int | None, execution_bounds: AgentExecutionBounds | None) -> Any:
+        try:
+            return self.agent.chat(prompt, llm_timeout=timeout, execution_bounds=execution_bounds)
+        except TypeError as exc:
+            text = str(exc)
+            if "llm_timeout" not in text and "execution_bounds" not in text:
+                raise
+            return self.agent.chat(prompt)
+
+    @staticmethod
+    def _max_steps_for_phase(phase: LoopPhase) -> int:
+        base = 8
+        if phase.id in {"context_scan", "implementation", "repair_if_needed"}:
+            return 12
+        if (phase.timeout or 0) >= 600:
+            return 12
+        return base
+
+    @staticmethod
+    def _llm_timeout_for_phase(phase: LoopPhase) -> int:
+        if phase.timeout:
+            return max(180, min(600, int(phase.timeout)))
+        return 180
+
+    @staticmethod
+    def _execution_bounds_for_spec(spec: LoopSpec) -> AgentExecutionBounds | None:
+        raw = spec.execution_limits.get("max_file_changes")
+        try:
+            max_file_changes = int(raw)
+        except (TypeError, ValueError):
+            return None
+        if max_file_changes <= 0:
+            return None
+        return AgentExecutionBounds(max_file_changes=max_file_changes)
+
+    def _execution_bounds_with_baseline(self, spec: LoopSpec) -> AgentExecutionBounds | None:
+        bounds = self._execution_bounds_for_spec(spec)
+        if bounds is None:
+            return None
+        baseline = frozenset(self.agent.modified_file_paths()) if hasattr(self.agent, "modified_file_paths") else frozenset()
+        return AgentExecutionBounds(max_file_changes=bounds.max_file_changes, baseline_modified_files=baseline)
+
+    @staticmethod
+    def _is_transient_llm_error(exc: Exception) -> bool:
+        if isinstance(exc, (TimeoutError, urllib.error.URLError)):
+            return True
+        text = str(exc).lower()
+        return any(marker in text for marker in ("http 429", "rate limit", "resource", "资源不足", "timeout", "temporarily"))
 
     def _phase_args(self, phase: LoopPhase, outputs: dict[str, str]) -> dict[str, Any]:
         args = self._render(phase.args, outputs)
@@ -561,6 +792,8 @@ def validate_loop_spec(spec: LoopSpec, *, agent: Any | None = None, strict_polic
     for phase in spec.phases:
         if phase.type not in known_phase_types:
             errors.append(f"phase {phase.id} has unknown type {phase.type}")
+        if phase.type == "agent" and agent is not None and getattr(getattr(agent, "llm", None), "available", False) is False:
+            warnings.append(f"phase {phase.id} requires a configured LLM at execution time")
         if phase.type == "tool":
             if not phase.tool:
                 errors.append(f"phase {phase.id} is type=tool but missing tool")
