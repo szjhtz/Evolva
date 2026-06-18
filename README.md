@@ -132,7 +132,7 @@ Evolva 的功能按真实使用路径组织：先让 Agent 看懂仓库，再安
 ## 架构总览
 
 <p align="center">
-  <img src="assets/architecture.svg" alt="Evolva architecture" width="100%" />
+  <img src="assets/architecture.png" alt="Evolva architecture" width="100%" />
 </p>
 
 架构上只有三件事：
@@ -439,7 +439,7 @@ TUI 支持常见工作台快捷键：
 ## Workflow / MCP / Memory 闭环
 
 <p align="center">
-  <img src="assets/workflow-mcp-memory.svg" alt="Evolva workflow MCP memory" width="100%" />
+  <img src="assets/workflow-mcp-memory.png" alt="Evolva workflow MCP memory" width="100%" />
 </p>
 
 ## 安全与可审计执行
@@ -489,9 +489,9 @@ evals/
 .github/workflows/ci.yml     单测 + Eval gate
 assets/
   evolva-poster.jpeg        README 顶部海报
-  architecture.svg
+  architecture.png
   tui-mockup.svg
-  workflow-mcp-memory.svg
+  workflow-mcp-memory.png
 ```
 
 ---
