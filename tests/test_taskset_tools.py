@@ -7,8 +7,8 @@ from pathlib import Path
 
 from evolva.cli import main
 from evolva.config import AgentConfig
-from evolva.eval.benchmark import build_benchmark_prompt, benchmark_smoke_report, render_benchmark_smoke_report, run_benchmark_sample
-from evolva.tools.benchmark import classify_benchmark_task, file_to_text, benchmark_task_context, benchmark_tool_health, normalize_answer, ocr_image, resolve_attachment, spreadsheet_describe, video_probe, web_search_pro
+from evolva.eval.taskset import build_taskset_prompt, taskset_smoke_report, render_taskset_smoke_report, run_taskset_sample
+from evolva.tools.taskset import classify_taskset_task, file_to_text, taskset_context, taskset_tool_health, normalize_answer, ocr_image, resolve_attachment, spreadsheet_describe, video_probe, web_search_pro
 
 
 def _write_metadata(path: Path, rows: list[dict[str, str]]) -> None:
@@ -25,11 +25,11 @@ def test_normalize_classify_and_resolve_attachment(tmp_path: Path):
     attachment.write_text("hello", encoding="utf-8")
 
     assert normalize_answer("  Hello!\n") == "hello"
-    cls = classify_benchmark_task("Count rows in this spreadsheet", "data.csv")
+    cls = classify_taskset_task("Count rows in this spreadsheet", "data.csv")
     assert cls["status"] == "native_or_likely"
     assert {"calc", "table"}.issubset(cls["categories"])
 
-    media = classify_benchmark_task("What is said in the audio?", "clip.mp3")
+    media = classify_taskset_task("What is said in the audio?", "clip.mp3")
     assert media["status"] == "needs_external_media_tool"
     assert "audio" in media["categories"]
 
@@ -57,7 +57,7 @@ def test_file_to_text_csv_docx_and_spreadsheet(tmp_path: Path):
     assert "Doc text" in docx_result.output
 
 
-def test_benchmark_smoke_report_and_task_context(tmp_path: Path):
+def test_taskset_smoke_report_and_task_context(tmp_path: Path):
     attachments = tmp_path / "attachments"
     attachments.mkdir()
     (attachments / "note.txt").write_text("attachment text", encoding="utf-8")
@@ -70,14 +70,14 @@ def test_benchmark_smoke_report_and_task_context(tmp_path: Path):
         ],
     )
 
-    report = benchmark_smoke_report(metadata, attachments)
+    report = taskset_smoke_report(metadata, attachments)
     assert report.total_tasks == 2
     assert report.resolved_attachments == 1
     assert report.preview_ok == 1
-    rendered = render_benchmark_smoke_report(report)
-    assert "Benchmark smoke report" in rendered
+    rendered = render_taskset_smoke_report(report)
+    assert "Task-set smoke report" in rendered
 
-    context = benchmark_task_context(metadata, attachments, task_id="1")
+    context = taskset_context(metadata, attachments, task_id="1")
     assert context.ok
     data = json.loads(context.output)
     assert data[0]["preview"]["ok"]
@@ -94,23 +94,23 @@ def test_prompt_run_dry_and_cli_smoke(tmp_path: Path, capsys):
         [{"task_id": "1", "Question": "What number is in the file?", "Level": "1", "Final answer": "42", "file_name": "note.txt", "file_path": "", "Annotator Metadata": ""}],
     )
 
-    prompt = build_benchmark_prompt({"task_id": "1", "Level": "1", "Question": "Q", "Final answer": "A"}, attachment_text="T", attachment_path="p", include_answer=True)
+    prompt = build_taskset_prompt({"task_id": "1", "Level": "1", "Question": "Q", "Final answer": "A"}, attachment_text="T", attachment_path="p", include_answer=True)
     assert "Reference final answer" in prompt
 
-    rows = run_benchmark_sample(AgentConfig(root=tmp_path), metadata, attachments, include_answers=True)
+    rows = run_taskset_sample(AgentConfig(root=tmp_path), metadata, attachments, include_answers=True)
     assert rows[0]["normalized_reference_answer"] == "42"
     assert "Attachment preview" in rows[0]["prompt"]
 
-    rc = main(["benchmark", "smoke", "--metadata", str(metadata), "--attachments", str(attachments), "--limit", "1"])
+    rc = main(["taskset", "smoke", "--metadata", str(metadata), "--attachments", str(attachments), "--limit", "1"])
     out = capsys.readouterr().out
     assert rc == 0
-    assert "Benchmark smoke report" in out
+    assert "Task-set smoke report" in out
 
 
-def test_benchmark_optional_tool_health_and_media_wrappers(tmp_path: Path, capsys):
-    health = benchmark_tool_health()
+def test_taskset_optional_tool_health_and_media_wrappers(tmp_path: Path, capsys):
+    health = taskset_tool_health()
     assert health.ok
-    assert "Benchmark optional tool health" in health.output
+    assert "Task-set optional tool health" in health.output
     assert "binaries" in health.data
     assert "browser_search" in health.data
     assert "ocr_image" in health.data["capabilities"]
@@ -127,10 +127,10 @@ def test_benchmark_optional_tool_health_and_media_wrappers(tmp_path: Path, capsy
     assert isinstance(probe.ok, bool)
     assert probe.data["path"].endswith("fake.mp4")
 
-    rc = main(["benchmark", "health"])
+    rc = main(["taskset", "health"])
     out = capsys.readouterr().out
     assert rc == 0
-    assert "Benchmark optional tool health" in out
+    assert "Task-set optional tool health" in out
 
 
 def test_web_search_pro_duckduckgo_mock(monkeypatch):

@@ -507,7 +507,7 @@ evolva/
   agent/policy.py            guardrails 与风险决策
   agent/sandbox.py           workspace sandbox 与 backend 执行抽象
   tools/builtin.py           内置工具注册
-  eval/harness.py            JSONL eval runner
+  eval/harness.py            JSONL regression harness
   workflow/engine.py         workflow DAG engine
 evals/
   baselines/                 Eval-as-CI 回归基线

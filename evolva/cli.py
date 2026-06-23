@@ -10,8 +10,8 @@ from evolva.agent.core import EvolvaAgent
 from evolva.agent.dream import DreamEngine
 from evolva.agent.evolution_analyzer import EvalEvolutionAnalyzer, TraceEvolutionAnalyzer, apply_proposals, render_analysis, render_reports
 from evolva.config import AgentConfig
-from evolva.eval.benchmark import benchmark_smoke_report, render_benchmark_smoke_report, run_benchmark_sample, write_benchmark_report
-from evolva.tools import benchmark as benchmark_tools
+from evolva.eval.taskset import taskset_smoke_report, render_taskset_smoke_report, run_taskset_sample, write_taskset_report
+from evolva.tools import taskset as taskset_tools
 from evolva.agent.mcp_presets import parse_env_pairs
 from evolva.eval.harness import EvalHarness, render_gate, render_results
 from evolva.loops import LoopDraftSession, LoopRunner, render_confirmed_draft, render_loop_draft, render_loop_result, render_loop_specs, render_loop_validation, validate_loop_spec
@@ -505,35 +505,35 @@ def eval_cmd(args: argparse.Namespace) -> int:
     return 0 if gate.ok else 1
 
 
-def benchmark_cmd(args: argparse.Namespace) -> int:
+def taskset_cmd(args: argparse.Namespace) -> int:
     config = AgentConfig()
-    if args.benchmark_cmd == "health":
-        result = benchmark_tools.benchmark_tool_health(config.mcp_config_file)
+    if args.taskset_cmd == "health":
+        result = taskset_tools.taskset_tool_health(config.mcp_config_file)
         if args.json:
             print(json.dumps(result.data, ensure_ascii=False, indent=2))
         else:
             print(result.output)
         return 0 if result.ok else 1
-    if args.benchmark_cmd == "inspect-file":
+    if args.taskset_cmd == "inspect-file":
         path = args.path
-        result = benchmark_tools.file_to_text(path, max_chars=args.max_chars, max_rows=args.max_rows)
+        result = taskset_tools.file_to_text(path, max_chars=args.max_chars, max_rows=args.max_rows)
         extra: dict[str, Any] = {"preview": result.data}
         if args.deep:
             suffix = path.suffix.lower()
-            if suffix in benchmark_tools.IMAGE_EXTENSIONS:
-                ocr = benchmark_tools.ocr_image(path, language=args.language, max_chars=args.max_chars, timeout=args.timeout)
+            if suffix in taskset_tools.IMAGE_EXTENSIONS:
+                ocr = taskset_tools.ocr_image(path, language=args.language, max_chars=args.max_chars, timeout=args.timeout)
                 extra["ocr"] = ocr.data
-            elif suffix in benchmark_tools.AUDIO_EXTENSIONS:
-                transcript = benchmark_tools.audio_transcribe(path, model=args.model, language=args.language if args.language != "eng" else "", max_chars=args.max_chars, timeout=args.timeout)
+            elif suffix in taskset_tools.AUDIO_EXTENSIONS:
+                transcript = taskset_tools.audio_transcribe(path, model=args.model, language=args.language if args.language != "eng" else "", max_chars=args.max_chars, timeout=args.timeout)
                 extra["transcript"] = transcript.data
-            elif suffix in benchmark_tools.VIDEO_EXTENSIONS:
-                probe = benchmark_tools.video_probe(path, timeout=min(args.timeout, 120))
+            elif suffix in taskset_tools.VIDEO_EXTENSIONS:
+                probe = taskset_tools.video_probe(path, timeout=min(args.timeout, 120))
                 extra["probe"] = probe.data
                 if args.frames_dir:
-                    frames = benchmark_tools.video_extract_frames(path, args.frames_dir, every_seconds=args.every_seconds, max_frames=args.max_frames, timeout=args.timeout)
+                    frames = taskset_tools.video_extract_frames(path, args.frames_dir, every_seconds=args.every_seconds, max_frames=args.max_frames, timeout=args.timeout)
                     extra["frames"] = frames.data
             elif suffix == ".pdf":
-                pdf = benchmark_tools.pdf_extract_external(path, max_chars=args.max_chars, timeout=args.timeout)
+                pdf = taskset_tools.pdf_extract_external(path, max_chars=args.max_chars, timeout=args.timeout)
                 extra["pdf"] = pdf.data
         if args.json:
             print(json.dumps(extra, ensure_ascii=False, indent=2))
@@ -545,18 +545,18 @@ def benchmark_cmd(args: argparse.Namespace) -> int:
                     if text:
                         print(f"\n--- {key} ---\n{text}")
         return 0 if result.ok else 1
-    if args.benchmark_cmd == "smoke":
-        report = benchmark_smoke_report(args.metadata, args.attachments, limit=args.limit, max_chars=args.max_chars)
+    if args.taskset_cmd == "smoke":
+        report = taskset_smoke_report(args.metadata, args.attachments, limit=args.limit, max_chars=args.max_chars)
         if args.json:
             print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
         else:
-            print(render_benchmark_smoke_report(report))
+            print(render_taskset_smoke_report(report))
         if args.output:
-            path = write_benchmark_report(report, args.output)
+            path = write_taskset_report(report, args.output)
             print(f"Report: {path}")
         return 1 if args.strict and (report.missing_attachments or report.preview_failed) else 0
-    if args.benchmark_cmd == "run":
-        rows = run_benchmark_sample(
+    if args.taskset_cmd == "run":
+        rows = run_taskset_sample(
             config,
             args.metadata,
             args.attachments,
@@ -571,7 +571,7 @@ def benchmark_cmd(args: argparse.Namespace) -> int:
             print(json.dumps(rows, ensure_ascii=False, indent=2))
         else:
             for item in rows:
-                print(f"\n--- benchmark {item.get('task_id')} level={item.get('level')} ---")
+                print(f"\n--- task-set {item.get('task_id')} level={item.get('level')} ---")
                 if args.run_agent:
                     print(item.get("answer", ""))
                     if item.get("exact_match") is not None:
@@ -579,7 +579,7 @@ def benchmark_cmd(args: argparse.Namespace) -> int:
                 else:
                     print(item.get("prompt", ""))
         return 0
-    raise SystemExit("unknown benchmark command")
+    raise SystemExit("unknown taskset command")
 
 
 def workflow_cmd(args: argparse.Namespace) -> int:
@@ -821,7 +821,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--yes", action="store_true", help="Approve shell/python tools without prompting in default TUI mode")
     parser.add_argument("--no-tools", action="store_true", help="Hide the TUI tool log panel at startup")
     parser.add_argument("--fullscreen", action="store_true", help="Use the legacy full-screen curses TUI")
-    sub = parser.add_subparsers(dest="cmd", required=False, metavar="{tui,ask,trace,metrics,sandbox,eval,benchmark,evolve,optimize,dream,loop,workflow,mcp}")
+    sub = parser.add_subparsers(dest="cmd", required=False, metavar="{tui,ask,trace,metrics,sandbox,eval,taskset,evolve,optimize,dream,loop,workflow,mcp}")
     tui_p = sub.add_parser("tui", help="Open the Evolva TUI workbench explicitly")
     tui_p.add_argument("--yes", action="store_true", help="Approve shell/python tools without prompting")
     tui_p.add_argument("--no-tools", action="store_true", help="Hide the tool log panel at startup")
@@ -877,44 +877,44 @@ def build_parser() -> argparse.ArgumentParser:
     eval_p.add_argument("--no-regression", action="store_true", help="Fail if any baseline task regresses")
     eval_p.set_defaults(func=eval_cmd)
 
-    benchmark_p = sub.add_parser("benchmark", help="Automation: inspect and dry-run benchmark tasks")
-    benchmark_sub = benchmark_p.add_subparsers(dest="benchmark_cmd", required=True)
-    benchmark_health = benchmark_sub.add_parser("health", help="Report optional OCR/PDF/audio/video/web tools for stronger benchmark coverage")
-    benchmark_health.add_argument("--json", action="store_true", help="Print JSON health report")
-    benchmark_health.set_defaults(func=benchmark_cmd)
-    benchmark_inspect = benchmark_sub.add_parser("inspect-file", help="Preview one benchmark-style attachment and optionally run deeper media/OCR/PDF tools")
-    benchmark_inspect.add_argument("path", type=lambda s: __import__("pathlib").Path(s), help="Attachment path to inspect")
-    benchmark_inspect.add_argument("--max-chars", type=int, default=20000, help="Text output budget")
-    benchmark_inspect.add_argument("--max-rows", type=int, default=20, help="Table row preview budget")
-    benchmark_inspect.add_argument("--deep", action="store_true", help="Run optional OCR/transcription/probe/PDF extraction when supported")
-    benchmark_inspect.add_argument("--language", default="eng", help="OCR/Whisper language hint")
-    benchmark_inspect.add_argument("--model", default="base", help="Whisper model name for --deep audio transcription")
-    benchmark_inspect.add_argument("--timeout", type=int, default=120, help="External tool timeout in seconds")
-    benchmark_inspect.add_argument("--frames-dir", type=lambda s: __import__("pathlib").Path(s), help="Directory for --deep video frame extraction")
-    benchmark_inspect.add_argument("--every-seconds", type=float, default=10.0, help="Video frame interval for --frames-dir")
-    benchmark_inspect.add_argument("--max-frames", type=int, default=12, help="Maximum video frames to extract")
-    benchmark_inspect.add_argument("--json", action="store_true", help="Print JSON inspection report")
-    benchmark_inspect.set_defaults(func=benchmark_cmd)
-    benchmark_smoke = benchmark_sub.add_parser("smoke", help="Read benchmark metadata/attachments and report local readiness")
-    benchmark_smoke.add_argument("--metadata", required=True, type=lambda s: __import__("pathlib").Path(s), help="benchmark metadata.csv path")
-    benchmark_smoke.add_argument("--attachments", required=True, type=lambda s: __import__("pathlib").Path(s), help="benchmark attachment directory")
-    benchmark_smoke.add_argument("--limit", type=int, default=0, help="Number of rows to inspect; 0 means all rows")
-    benchmark_smoke.add_argument("--max-chars", type=int, default=4000, help="Attachment preview character budget per file")
-    benchmark_smoke.add_argument("--json", action="store_true", help="Print JSON report")
-    benchmark_smoke.add_argument("--strict", action="store_true", help="Exit non-zero if attachments are missing or previews fail")
-    benchmark_smoke.add_argument("--output", type=lambda s: __import__("pathlib").Path(s), help="Directory to write benchmark_smoke_*.json")
-    benchmark_smoke.set_defaults(func=benchmark_cmd)
-    benchmark_run = benchmark_sub.add_parser("run", help="Build benchmark prompts, or run a small sample through the agent with --run-agent")
-    benchmark_run.add_argument("--metadata", required=True, type=lambda s: __import__("pathlib").Path(s), help="benchmark metadata.csv path")
-    benchmark_run.add_argument("--attachments", required=True, type=lambda s: __import__("pathlib").Path(s), help="benchmark attachment directory")
-    benchmark_run.add_argument("--limit", type=int, default=1, help="Number of tasks to prepare/run")
-    benchmark_run.add_argument("--level", help="Optional benchmark level filter, e.g. 1, 2, 3")
-    benchmark_run.add_argument("--run-agent", action="store_true", help="Actually call EvolvaAgent; otherwise only print prompts")
-    benchmark_run.add_argument("--include-answers", action="store_true", help="Include reference answers and exact-match fields for local evaluation")
-    benchmark_run.add_argument("--max-attachment-chars", type=int, default=8000, help="Attachment text budget in prompts")
-    benchmark_run.add_argument("--json", action="store_true", help="Print JSON rows")
-    benchmark_run.add_argument("--yes", action="store_true", help="Approve tools during --run-agent")
-    benchmark_run.set_defaults(func=benchmark_cmd)
+    taskset_p = sub.add_parser("taskset", help="Automation: inspect and dry-run task-set rows")
+    taskset_sub = taskset_p.add_subparsers(dest="taskset_cmd", required=True)
+    taskset_health = taskset_sub.add_parser("health", help="Report optional OCR/PDF/audio/video/web tools for stronger task-set coverage")
+    taskset_health.add_argument("--json", action="store_true", help="Print JSON health report")
+    taskset_health.set_defaults(func=taskset_cmd)
+    taskset_inspect = taskset_sub.add_parser("inspect-file", help="Preview one task-set attachment and optionally run deeper media/OCR/PDF tools")
+    taskset_inspect.add_argument("path", type=lambda s: __import__("pathlib").Path(s), help="Attachment path to inspect")
+    taskset_inspect.add_argument("--max-chars", type=int, default=20000, help="Text output budget")
+    taskset_inspect.add_argument("--max-rows", type=int, default=20, help="Table row preview budget")
+    taskset_inspect.add_argument("--deep", action="store_true", help="Run optional OCR/transcription/probe/PDF extraction when supported")
+    taskset_inspect.add_argument("--language", default="eng", help="OCR/Whisper language hint")
+    taskset_inspect.add_argument("--model", default="base", help="Whisper model name for --deep audio transcription")
+    taskset_inspect.add_argument("--timeout", type=int, default=120, help="External tool timeout in seconds")
+    taskset_inspect.add_argument("--frames-dir", type=lambda s: __import__("pathlib").Path(s), help="Directory for --deep video frame extraction")
+    taskset_inspect.add_argument("--every-seconds", type=float, default=10.0, help="Video frame interval for --frames-dir")
+    taskset_inspect.add_argument("--max-frames", type=int, default=12, help="Maximum video frames to extract")
+    taskset_inspect.add_argument("--json", action="store_true", help="Print JSON inspection report")
+    taskset_inspect.set_defaults(func=taskset_cmd)
+    taskset_smoke = taskset_sub.add_parser("smoke", help="Read task metadata/attachments and report local readiness")
+    taskset_smoke.add_argument("--metadata", required=True, type=lambda s: __import__("pathlib").Path(s), help="task metadata.csv path")
+    taskset_smoke.add_argument("--attachments", required=True, type=lambda s: __import__("pathlib").Path(s), help="task attachment directory")
+    taskset_smoke.add_argument("--limit", type=int, default=0, help="Number of rows to inspect; 0 means all rows")
+    taskset_smoke.add_argument("--max-chars", type=int, default=4000, help="Attachment preview character budget per file")
+    taskset_smoke.add_argument("--json", action="store_true", help="Print JSON report")
+    taskset_smoke.add_argument("--strict", action="store_true", help="Exit non-zero if attachments are missing or previews fail")
+    taskset_smoke.add_argument("--output", type=lambda s: __import__("pathlib").Path(s), help="Directory to write taskset_smoke_*.json")
+    taskset_smoke.set_defaults(func=taskset_cmd)
+    taskset_run = taskset_sub.add_parser("run", help="Build task-set prompts, or run a small sample through the agent with --run-agent")
+    taskset_run.add_argument("--metadata", required=True, type=lambda s: __import__("pathlib").Path(s), help="task metadata.csv path")
+    taskset_run.add_argument("--attachments", required=True, type=lambda s: __import__("pathlib").Path(s), help="task attachment directory")
+    taskset_run.add_argument("--limit", type=int, default=1, help="Number of tasks to prepare/run")
+    taskset_run.add_argument("--level", help="Optional task-set level filter, e.g. 1, 2, 3")
+    taskset_run.add_argument("--run-agent", action="store_true", help="Actually call EvolvaAgent; otherwise only print prompts")
+    taskset_run.add_argument("--include-answers", action="store_true", help="Include reference answers and exact-match fields for local evaluation")
+    taskset_run.add_argument("--max-attachment-chars", type=int, default=8000, help="Attachment text budget in prompts")
+    taskset_run.add_argument("--json", action="store_true", help="Print JSON rows")
+    taskset_run.add_argument("--yes", action="store_true", help="Approve tools during --run-agent")
+    taskset_run.set_defaults(func=taskset_cmd)
 
     evolve_p = sub.add_parser("evolve", help="Automation: inspect or apply self-evolution proposals")
     evolve_sub = evolve_p.add_subparsers(dest="evolve_cmd", required=True)

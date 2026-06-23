@@ -38,12 +38,12 @@ class MCPPreset:
 MCP_PRESETS: dict[str, MCPPreset] = {
     "playwright": MCPPreset(
         name="playwright",
-        description="Browser automation MCP for dynamic benchmark web pages, screenshots, forms, and JS-rendered sites.",
+        description="Browser automation MCP for dynamic web pages, screenshots, forms, and JS-rendered sites.",
         command="npx",
         args=("-y", "@playwright/mcp@latest"),
         request_timeout=90,
         max_message_bytes=8_000_000,
-        tags=("browser", "web", "benchmark"),
+        tags=("browser", "web", "task-set"),
         install_hint="First run may download the npm package and Playwright browsers; network access is required.",
     ),
     "fetch": MCPPreset(
@@ -53,17 +53,17 @@ MCP_PRESETS: dict[str, MCPPreset] = {
         args=("mcp-server-fetch",),
         request_timeout=60,
         max_message_bytes=4_000_000,
-        tags=("fetch", "web", "benchmark"),
+        tags=("fetch", "web", "task-set"),
         install_hint="Requires uv/uvx and network access on first run.",
     ),
     "brave-search": MCPPreset(
         name="brave-search",
-        description="Search MCP backed by Brave Search API; useful when benchmark questions require current web search.",
+        description="Search MCP backed by Brave Search API; useful when web tasks require current web search.",
         command="npx",
         args=("-y", "@modelcontextprotocol/server-brave-search"),
         request_timeout=60,
         max_message_bytes=4_000_000,
-        tags=("search", "web", "benchmark"),
+        tags=("search", "web", "task-set"),
         install_hint="Requires BRAVE_API_KEY in the server environment and network access on first run.",
     ),
 }

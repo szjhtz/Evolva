@@ -330,7 +330,7 @@ evolva/
   agent/policy.py            guardrails and risk decisions
   agent/sandbox.py           workspace sandbox and execution
   tools/builtin.py           built-in tool registry
-  eval/harness.py            JSONL eval runner
+  eval/harness.py            JSONL regression harness
   workflow/engine.py         workflow DAG engine
 assets/
   evolva-poster.jpeg        README hero poster

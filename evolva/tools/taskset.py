@@ -26,10 +26,10 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff"}
 AUDIO_EXTENSIONS = {".mp3", ".m4a", ".wav", ".flac", ".ogg"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
 ARCHIVE_EXTENSIONS = {".zip"}
-BENCHMARK_EXTERNAL_BINARIES = ["tesseract", "ffmpeg", "ffprobe", "yt-dlp", "whisper", "pdftotext"]
-BENCHMARK_BROWSER_SEARCH_BINARIES = ["node", "npx", "uv", "uvx", "playwright", "google-chrome", "chromium"]
-BENCHMARK_SEARCH_ENV_KEYS = ["TAVILY_API_KEY", "BRAVE_API_KEY", "SERPAPI_API_KEY", "BING_SEARCH_API_KEY", "EXA_API_KEY"]
-BENCHMARK_OPTIONAL_MODULES = ["pypdf", "PyPDF2", "pandas", "pyarrow", "openpyxl", "PIL", "pytesseract", "moviepy"]
+TASKSET_EXTERNAL_BINARIES = ["tesseract", "ffmpeg", "ffprobe", "yt-dlp", "whisper", "pdftotext"]
+TASKSET_BROWSER_SEARCH_BINARIES = ["node", "npx", "uv", "uvx", "playwright", "google-chrome", "chromium"]
+TASKSET_SEARCH_ENV_KEYS = ["TAVILY_API_KEY", "BRAVE_API_KEY", "SERPAPI_API_KEY", "BING_SEARCH_API_KEY", "EXA_API_KEY"]
+TASKSET_OPTIONAL_MODULES = ["pypdf", "PyPDF2", "pandas", "pyarrow", "openpyxl", "PIL", "pytesseract", "moviepy"]
 
 
 def _module_available(name: str) -> bool:
@@ -69,7 +69,7 @@ def _missing_dependency(tool: str, install_hint: str, data: dict[str, Any] | Non
 
 
 def normalize_answer(answer: str) -> str:
-    """Normalize benchmark-style final answers for lightweight exact matching."""
+    """Normalize task-set final answers for lightweight exact matching."""
 
     text = str(answer or "").strip().lower()
     text = re.sub(r"\s+", " ", text)
@@ -99,8 +99,8 @@ def _mcp_web_config_summary(mcp_config_file: str | Path | None = None) -> dict[s
 
 
 def browser_search_health(mcp_config_file: str | Path | None = None) -> dict[str, Any]:
-    binaries = {name: {"available": shutil.which(name) is not None, "path": shutil.which(name)} for name in BENCHMARK_BROWSER_SEARCH_BINARIES}
-    env_keys = {key: {"configured": bool(os.getenv(key))} for key in BENCHMARK_SEARCH_ENV_KEYS}
+    binaries = {name: {"available": shutil.which(name) is not None, "path": shutil.which(name)} for name in TASKSET_BROWSER_SEARCH_BINARIES}
+    env_keys = {key: {"configured": bool(os.getenv(key))} for key in TASKSET_SEARCH_ENV_KEYS}
     mcp_config = _mcp_web_config_summary(mcp_config_file)
     capabilities = {
         "static_web_fetch": True,
@@ -112,11 +112,11 @@ def browser_search_health(mcp_config_file: str | Path | None = None) -> dict[str
     return {"binaries": binaries, "env_keys": env_keys, "mcp": mcp_config, "capabilities": capabilities}
 
 
-def benchmark_tool_health(mcp_config_file: str | Path | None = None) -> ToolResult:
-    """Report optional local tools that materially improve benchmark coverage."""
+def taskset_tool_health(mcp_config_file: str | Path | None = None) -> ToolResult:
+    """Report optional local tools that materially improve task-set coverage."""
 
-    binaries = {name: {"available": shutil.which(name) is not None, "path": shutil.which(name)} for name in BENCHMARK_EXTERNAL_BINARIES}
-    modules = {name: {"available": _module_available(name)} for name in BENCHMARK_OPTIONAL_MODULES}
+    binaries = {name: {"available": shutil.which(name) is not None, "path": shutil.which(name)} for name in TASKSET_EXTERNAL_BINARIES}
+    modules = {name: {"available": _module_available(name)} for name in TASKSET_OPTIONAL_MODULES}
     capabilities = {
         "static_web_fetch": True,
         "text_csv_docx_pptx_zip": True,
@@ -135,12 +135,12 @@ def benchmark_tool_health(mcp_config_file: str | Path | None = None) -> ToolResu
         "browser_mcp": web_health["capabilities"]["browser_mcp_configured"],
         "browser_runtime": web_health["capabilities"]["browser_runtime"],
     })
-    missing_for_high_score = [
+    missing_for_broad_coverage = [
         name
         for name in ["pdf_text", "ocr_image", "audio_transcription", "video_probe", "video_frames", "youtube_metadata", "parquet_table"]
         if not capabilities.get(name)
     ]
-    lines = ["Benchmark optional tool health", "Binaries:"]
+    lines = ["Task-set optional tool health", "Binaries:"]
     for name, info in binaries.items():
         lines.append(f"- {name}: {'ok' if info['available'] else 'missing'}" + (f" ({info['path']})" if info.get("path") else ""))
     lines.append("Python modules:")
@@ -156,9 +156,9 @@ def benchmark_tool_health(mcp_config_file: str | Path | None = None) -> ToolResu
     lines.append(f"- search_api_keys: {', '.join(configured_keys) if configured_keys else 'none'}")
     mcp_servers = web_health["mcp"].get("browser_search_servers", [])
     lines.append(f"- browser_search_mcp_servers: {', '.join(mcp_servers) if mcp_servers else 'none'}")
-    if missing_for_high_score:
-        lines.append("Recommended optional installs for stronger benchmark coverage: brew install tesseract ffmpeg yt-dlp poppler; pip install pypdf openpyxl pandas pyarrow pillow pytesseract openai-whisper")
-    return ToolResult(True, "\n".join(lines), {"binaries": binaries, "modules": modules, "browser_search": web_health, "capabilities": capabilities, "missing_for_high_score": missing_for_high_score})
+    if missing_for_broad_coverage:
+        lines.append("Recommended optional installs for stronger task-set coverage: brew install tesseract ffmpeg yt-dlp poppler; pip install pypdf openpyxl pandas pyarrow pillow pytesseract openai-whisper")
+    return ToolResult(True, "\n".join(lines), {"binaries": binaries, "modules": modules, "browser_search": web_health, "capabilities": capabilities, "missing_for_broad_coverage": missing_for_broad_coverage})
 
 
 class _HTMLTextExtractor(HTMLParser):
@@ -229,7 +229,7 @@ def _normalize_search_rows(rows: list[dict[str, Any]], max_results: int, source:
 
 def _search_duckduckgo(query: str, max_results: int, timeout: int) -> list[dict[str, str]]:
     url = "https://duckduckgo.com/html/?" + urllib.parse.urlencode({"q": query})
-    req = urllib.request.Request(url, headers={"User-Agent": "evolva-benchmark/0.1"})
+    req = urllib.request.Request(url, headers={"User-Agent": "evolva-agent/0.1"})
     with urllib.request.urlopen(req, timeout=max(1, int(timeout))) as resp:
         page = resp.read().decode("utf-8", errors="replace")
     matches = re.findall(r'<a rel="nofollow" class="result__a" href="([^"]+)">(.*?)</a>', page)
@@ -311,7 +311,7 @@ def web_search_pro(query: str, provider: str = "auto", max_results: int = 5, tim
 def web_fetch(url: str, max_chars: int = 20000, timeout: int = 20) -> ToolResult:
     if not re.match(r"^https?://", str(url or ""), flags=re.I):
         return ToolResult(False, "web_fetch only supports http(s) URLs", {"url": url})
-    req = urllib.request.Request(url, headers={"User-Agent": "evolva-benchmark/0.1"})
+    req = urllib.request.Request(url, headers={"User-Agent": "evolva-agent/0.1"})
     try:
         with urllib.request.urlopen(req, timeout=max(1, int(timeout))) as resp:
             raw = resp.read(max(int(max_chars) * 4, 4096))
@@ -525,7 +525,7 @@ def ocr_image(path: str | Path, language: str = "eng", max_chars: int = 20000, t
 
 def media_metadata(path: Path, kind: str) -> dict[str, Any]:
     need = "audio transcription" if kind == "audio" else "video frame/transcript extraction"
-    return {"ok": True, "kind": kind, "text": f"{kind.title()} file: {path.name} ({path.stat().st_size} bytes). benchmark solving may require {need} via Whisper/ffmpeg/yt-dlp or an external MCP tool."}
+    return {"ok": True, "kind": kind, "text": f"{kind.title()} file: {path.name} ({path.stat().st_size} bytes). task solving may require {need} via Whisper/ffmpeg/yt-dlp or an external MCP tool."}
 
 
 def audio_transcribe(path: str | Path, model: str = "base", language: str = "", max_chars: int = 20000, timeout: int = 600) -> ToolResult:
@@ -539,7 +539,7 @@ def audio_transcribe(path: str | Path, model: str = "base", language: str = "", 
     whisper = shutil.which("whisper")
     if not whisper:
         return _missing_dependency("whisper", "Install a local Whisper CLI, for example `pip install openai-whisper` (requires ffmpeg for many formats).", {"path": str(p)})
-    with tempfile.TemporaryDirectory(prefix="evolva-benchmark-whisper-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="evolva-taskset-whisper-") as tmp:
         argv = [whisper, str(p), "--model", model or "base", "--output_format", "txt", "--output_dir", tmp]
         if language:
             argv.extend(["--language", language])
@@ -688,7 +688,7 @@ def spreadsheet_describe(path: str | Path, max_rows: int = 20, max_chars: int = 
     return file_to_text(p, max_chars=max_chars, max_rows=max_rows)
 
 
-def classify_benchmark_task(question: str, file_name: str = "", annotator_metadata: str = "") -> dict[str, Any]:
+def classify_taskset_task(question: str, file_name: str = "", annotator_metadata: str = "") -> dict[str, Any]:
     text = f"{question or ''}\n{file_name or ''}\n{annotator_metadata or ''}".lower()
     suffix = Path(file_name).suffix.lower() if file_name else ""
     categories: list[str] = []
@@ -725,7 +725,7 @@ def classify_benchmark_task(question: str, file_name: str = "", annotator_metada
     return {"categories": categories, "status": status, "blockers": blockers, "file_extension": suffix}
 
 
-def load_benchmark_metadata(metadata_csv: str | Path) -> list[dict[str, str]]:
+def load_taskset_metadata(metadata_csv: str | Path) -> list[dict[str, str]]:
     path = Path(metadata_csv).expanduser().resolve()
     with path.open(newline="", encoding="utf-8-sig", errors="replace") as f:
         return [dict(row) for row in csv.DictReader(f)]
@@ -750,8 +750,8 @@ def resolve_attachment(task_id: str, file_name: str, attachments_dir: str | Path
     return {"task_id": task_id, "file_name": file_name, "path": str(path), "exists": path.exists(), "size_bytes": path.stat().st_size if path.exists() else None}
 
 
-def benchmark_task_context(metadata_csv: str | Path, attachments_dir: str | Path, task_id: str = "", limit: int = 5, max_chars: int = 12000) -> ToolResult:
-    rows = load_benchmark_metadata(metadata_csv)
+def taskset_context(metadata_csv: str | Path, attachments_dir: str | Path, task_id: str = "", limit: int = 5, max_chars: int = 12000) -> ToolResult:
+    rows = load_taskset_metadata(metadata_csv)
     if task_id:
         selected = [row for row in rows if row.get("task_id") == task_id]
     else:
@@ -763,6 +763,6 @@ def benchmark_task_context(metadata_csv: str | Path, attachments_dir: str | Path
         if attachment.get("exists") and attachment.get("path"):
             preview_result = file_to_text(attachment["path"], max_chars=max_chars)
             preview = {"ok": preview_result.ok, "output": preview_result.output[:max_chars], "data": preview_result.data}
-        contexts.append({"task_id": row.get("task_id"), "level": row.get("Level"), "question": row.get("Question"), "file_name": row.get("file_name"), "attachment": attachment, "classification": classify_benchmark_task(row.get("Question", ""), row.get("file_name", ""), row.get("Annotator Metadata", "")), "preview": preview})
+        contexts.append({"task_id": row.get("task_id"), "level": row.get("Level"), "question": row.get("Question"), "file_name": row.get("file_name"), "attachment": attachment, "classification": classify_taskset_task(row.get("Question", ""), row.get("file_name", ""), row.get("Annotator Metadata", "")), "preview": preview})
     output = json.dumps(contexts, ensure_ascii=False, indent=2)
     return ToolResult(True, output, {"count": len(contexts), "tasks": contexts})

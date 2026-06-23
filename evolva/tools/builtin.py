@@ -17,7 +17,7 @@ from evolva.agent.sandbox import Sandbox
 from evolva.agent.skills import SkillStore
 from evolva.agent.todo import TodoStore
 from evolva.tools.base import Tool, ToolRegistry, ToolResult
-from evolva.tools import benchmark as benchmark_tools
+from evolva.tools import taskset as taskset_tools
 
 
 def build_registry(
@@ -94,17 +94,17 @@ def build_registry(
         return result
 
     def web_search(query: str, max_results: int = 5) -> ToolResult:
-        result = benchmark_tools.web_search_pro(query, provider="auto", max_results=max_results)
+        result = taskset_tools.web_search_pro(query, provider="auto", max_results=max_results)
         context.add("artifact", f"Web search: {query} ok={result.ok}", meta=result.data if isinstance(result.data, dict) else {})
         return result
 
     def web_search_pro(query: str, provider: str = "auto", max_results: int = 5, timeout: int = 15) -> ToolResult:
-        result = benchmark_tools.web_search_pro(query, provider=provider, max_results=max_results, timeout=timeout)
+        result = taskset_tools.web_search_pro(query, provider=provider, max_results=max_results, timeout=timeout)
         context.add("artifact", f"Web search provider={provider}: {query} ok={result.ok}", meta=result.data if isinstance(result.data, dict) else {})
         return result
 
     def web_fetch(url: str, max_chars: int = 20000, timeout: int = 20) -> ToolResult:
-        result = benchmark_tools.web_fetch(url, max_chars=max_chars, timeout=timeout)
+        result = taskset_tools.web_fetch(url, max_chars=max_chars, timeout=timeout)
         context.add("artifact", f"Web fetch: {url} ok={result.ok}", meta=result.data if isinstance(result.data, dict) else {"url": url})
         return result
 
@@ -113,7 +113,7 @@ def build_registry(
             p = sandbox.resolve(path)
         except ValueError as exc:
             return ToolResult(False, str(exc), {"path": path})
-        result = benchmark_tools.file_to_text(p, max_chars=max_chars, max_rows=max_rows)
+        result = taskset_tools.file_to_text(p, max_chars=max_chars, max_rows=max_rows)
         context.add("artifact", f"File preview: {p} ok={result.ok}", meta=result.data if isinstance(result.data, dict) else {"path": str(p)})
         return result
 
@@ -122,36 +122,36 @@ def build_registry(
             p = sandbox.resolve(path)
         except ValueError as exc:
             return ToolResult(False, str(exc), {"path": path})
-        result = benchmark_tools.spreadsheet_describe(p, max_rows=max_rows, max_chars=max_chars)
+        result = taskset_tools.spreadsheet_describe(p, max_rows=max_rows, max_chars=max_chars)
         context.add("artifact", f"Spreadsheet preview: {p} ok={result.ok}", meta=result.data if isinstance(result.data, dict) else {"path": str(p)})
         return result
 
     def normalize_answer(answer: str) -> ToolResult:
-        normalized = benchmark_tools.normalize_answer(answer)
+        normalized = taskset_tools.normalize_answer(answer)
         return ToolResult(True, normalized, {"answer": answer, "normalized": normalized})
 
-    def benchmark_task_context(metadata_csv: str, attachments_dir: str, task_id: str = "", limit: int = 5, max_chars: int = 12000) -> ToolResult:
+    def taskset_context(metadata_csv: str, attachments_dir: str, task_id: str = "", limit: int = 5, max_chars: int = 12000) -> ToolResult:
         try:
             metadata_path = sandbox.resolve(metadata_csv)
             attachments_path = sandbox.resolve(attachments_dir)
         except ValueError as exc:
             return ToolResult(False, str(exc), {"metadata_csv": metadata_csv, "attachments_dir": attachments_dir})
-        return benchmark_tools.benchmark_task_context(metadata_path, attachments_path, task_id=task_id, limit=limit, max_chars=max_chars)
+        return taskset_tools.taskset_context(metadata_path, attachments_path, task_id=task_id, limit=limit, max_chars=max_chars)
 
-    def benchmark_smoke_check(metadata_csv: str, attachments_dir: str, limit: int = 20, max_chars: int = 4000) -> ToolResult:
+    def taskset_smoke_check(metadata_csv: str, attachments_dir: str, limit: int = 20, max_chars: int = 4000) -> ToolResult:
         try:
             metadata_path = sandbox.resolve(metadata_csv)
             attachments_path = sandbox.resolve(attachments_dir)
         except ValueError as exc:
             return ToolResult(False, str(exc), {"metadata_csv": metadata_csv, "attachments_dir": attachments_dir})
-        from evolva.eval.benchmark import benchmark_smoke_report, render_benchmark_smoke_report
+        from evolva.eval.taskset import taskset_smoke_report, render_taskset_smoke_report
 
-        report = benchmark_smoke_report(metadata_path, attachments_path, limit=limit, max_chars=max_chars)
-        return ToolResult(True, render_benchmark_smoke_report(report), report.to_dict())
+        report = taskset_smoke_report(metadata_path, attachments_path, limit=limit, max_chars=max_chars)
+        return ToolResult(True, render_taskset_smoke_report(report), report.to_dict())
 
-    def benchmark_tool_health() -> ToolResult:
-        result = benchmark_tools.benchmark_tool_health(mcp.config_file if mcp is not None else None)
-        context.add("artifact", "Benchmark optional tool health checked", meta=result.data if isinstance(result.data, dict) else {})
+    def taskset_tool_health() -> ToolResult:
+        result = taskset_tools.taskset_tool_health(mcp.config_file if mcp is not None else None)
+        context.add("artifact", "Task-set optional tool health checked", meta=result.data if isinstance(result.data, dict) else {})
         return result
 
     def ocr_image(path: str, language: str = "eng", max_chars: int = 20000, timeout: int = 60) -> ToolResult:
@@ -159,7 +159,7 @@ def build_registry(
             p = sandbox.resolve(path)
         except ValueError as exc:
             return ToolResult(False, str(exc), {"path": path})
-        result = benchmark_tools.ocr_image(p, language=language, max_chars=max_chars, timeout=timeout)
+        result = taskset_tools.ocr_image(p, language=language, max_chars=max_chars, timeout=timeout)
         context.add("artifact", f"OCR image: {p} ok={result.ok}", meta=result.data if isinstance(result.data, dict) else {"path": str(p)})
         return result
 
@@ -168,7 +168,7 @@ def build_registry(
             p = sandbox.resolve(path)
         except ValueError as exc:
             return ToolResult(False, str(exc), {"path": path})
-        result = benchmark_tools.audio_transcribe(p, model=model, language=language, max_chars=max_chars, timeout=timeout)
+        result = taskset_tools.audio_transcribe(p, model=model, language=language, max_chars=max_chars, timeout=timeout)
         context.add("artifact", f"Audio/video transcription: {p} ok={result.ok}", meta=result.data if isinstance(result.data, dict) else {"path": str(p)})
         return result
 
@@ -177,7 +177,7 @@ def build_registry(
             p = sandbox.resolve(path)
         except ValueError as exc:
             return ToolResult(False, str(exc), {"path": path})
-        result = benchmark_tools.video_probe(p, timeout=timeout)
+        result = taskset_tools.video_probe(p, timeout=timeout)
         context.add("artifact", f"Video probe: {p} ok={result.ok}", meta=result.data if isinstance(result.data, dict) else {"path": str(p)})
         return result
 
@@ -187,7 +187,7 @@ def build_registry(
             out = sandbox.resolve_write(output_dir)
         except ValueError as exc:
             return ToolResult(False, str(exc), {"path": path, "output_dir": output_dir})
-        result = benchmark_tools.video_extract_frames(p, out, every_seconds=every_seconds, max_frames=max_frames, timeout=timeout)
+        result = taskset_tools.video_extract_frames(p, out, every_seconds=every_seconds, max_frames=max_frames, timeout=timeout)
         context.add("artifact", f"Video frame extraction: {p} ok={result.ok}", meta=result.data if isinstance(result.data, dict) else {"path": str(p), "output_dir": str(out)})
         return result
 
@@ -196,12 +196,12 @@ def build_registry(
             p = sandbox.resolve(path)
         except ValueError as exc:
             return ToolResult(False, str(exc), {"path": path})
-        result = benchmark_tools.pdf_extract_external(p, max_chars=max_chars, timeout=timeout)
+        result = taskset_tools.pdf_extract_external(p, max_chars=max_chars, timeout=timeout)
         context.add("artifact", f"PDF extraction: {p} ok={result.ok}", meta=result.data if isinstance(result.data, dict) else {"path": str(p)})
         return result
 
     def yt_dlp_info(url: str, max_chars: int = 30000, timeout: int = 120) -> ToolResult:
-        result = benchmark_tools.yt_dlp_info(url, max_chars=max_chars, timeout=timeout)
+        result = taskset_tools.yt_dlp_info(url, max_chars=max_chars, timeout=timeout)
         context.add("artifact", f"yt-dlp info: {url} ok={result.ok}", meta=result.data if isinstance(result.data, dict) else {"url": url})
         return result
 
@@ -458,12 +458,12 @@ def build_registry(
     reg.register(Tool("web_search", "Search the web with configured APIs and DuckDuckGo HTML fallback", {"query": "str", "max_results": "int"}, web_search, capabilities=caps("web_search")))
     reg.register(Tool("web_search_pro", "Search the web using provider=auto|tavily|brave|serpapi|duckduckgo", {"query": "str", "provider": "str", "max_results": "int", "timeout": "int"}, web_search_pro, capabilities=caps("web_search_pro")))
     reg.register(Tool("web_fetch", "Fetch a static HTTP(S) page and return plain text when possible", {"url": "str", "max_chars": "int", "timeout": "int"}, web_fetch, capabilities=caps("web_fetch")))
-    reg.register(Tool("file_to_text", "Preview local text from benchmark-style attachments: text, CSV, DOCX, PPTX, XLSX, PDF best-effort, zip, image/media metadata", {"path": "str", "max_chars": "int", "max_rows": "int"}, file_to_text, capabilities=caps("file_to_text")))
+    reg.register(Tool("file_to_text", "Preview local text from task-set attachments: text, CSV, DOCX, PPTX, XLSX, PDF best-effort, zip, image/media metadata", {"path": "str", "max_chars": "int", "max_rows": "int"}, file_to_text, capabilities=caps("file_to_text")))
     reg.register(Tool("spreadsheet_describe", "Preview spreadsheet/table files including CSV, TSV, XLSX and optional parquet", {"path": "str", "max_rows": "int", "max_chars": "int"}, spreadsheet_describe, capabilities=caps("spreadsheet_describe")))
-    reg.register(Tool("normalize_answer", "Normalize a benchmark final answer for lightweight exact matching", {"answer": "str"}, normalize_answer, capabilities=caps("normalize_answer")))
-    reg.register(Tool("benchmark_task_context", "Build benchmark task context with resolved local attachment preview", {"metadata_csv": "str", "attachments_dir": "str", "task_id": "str", "limit": "int", "max_chars": "int"}, benchmark_task_context, capabilities=caps("benchmark_task_context")))
-    reg.register(Tool("benchmark_smoke_check", "Check whether a benchmark metadata CSV and attachment directory are readable and previewable", {"metadata_csv": "str", "attachments_dir": "str", "limit": "int", "max_chars": "int"}, benchmark_smoke_check, capabilities=caps("benchmark_smoke_check")))
-    reg.register(Tool("benchmark_tool_health", "Report optional OCR/PDF/audio/video/web tooling available for higher benchmark coverage", {}, benchmark_tool_health, capabilities=caps("benchmark_tool_health")))
+    reg.register(Tool("normalize_answer", "Normalize a task final answer for lightweight exact matching", {"answer": "str"}, normalize_answer, capabilities=caps("normalize_answer")))
+    reg.register(Tool("taskset_context", "Build task-set item context with resolved local attachment preview", {"metadata_csv": "str", "attachments_dir": "str", "task_id": "str", "limit": "int", "max_chars": "int"}, taskset_context, capabilities=caps("taskset_context")))
+    reg.register(Tool("taskset_smoke_check", "Check whether a task metadata CSV and attachment directory are readable and previewable", {"metadata_csv": "str", "attachments_dir": "str", "limit": "int", "max_chars": "int"}, taskset_smoke_check, capabilities=caps("taskset_smoke_check")))
+    reg.register(Tool("taskset_tool_health", "Report optional OCR/PDF/audio/video/web tooling available for higher task-set coverage", {}, taskset_tool_health, capabilities=caps("taskset_tool_health")))
     reg.register(Tool("ocr_image", "OCR a local image with optional pytesseract/Pillow or tesseract CLI", {"path": "str", "language": "str", "max_chars": "int", "timeout": "int"}, ocr_image, needs_confirmation=True, capabilities=caps("ocr_image")))
     reg.register(Tool("audio_transcribe", "Transcribe local audio/video with an installed Whisper CLI", {"path": "str", "model": "str", "language": "str", "max_chars": "int", "timeout": "int"}, audio_transcribe, needs_confirmation=True, capabilities=caps("audio_transcribe")))
     reg.register(Tool("video_probe", "Inspect local video/audio metadata with ffprobe", {"path": "str", "timeout": "int"}, video_probe, needs_confirmation=True, capabilities=caps("video_probe")))
