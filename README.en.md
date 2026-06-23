@@ -339,6 +339,14 @@ assets/
   workflow-mcp-memory.svg
 ```
 
+## Star History
+
+<p align="center">
+  <a href="https://www.star-history.com/#koppx/Evolva&Date">
+    <img src="https://api.star-history.com/svg?repos=koppx/Evolva&type=Date" alt="Evolva Star History" width="100%" />
+  </a>
+</p>
+
 ---
 
 <p align="center">
