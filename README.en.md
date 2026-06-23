@@ -83,20 +83,17 @@ Evolva is a composable, observable, and continuously improving Agent Harness. It
 
 ## Capability Map
 
-| Capability | What it does | Entry |
+| Capability | Reader-facing value | Entry |
 | --- | --- | --- |
-| **LangGraph Runtime** | Explicit `StateGraph` nodes: `prepare -> llm -> tool -> observe -> persist -> auto_evolve` | `evolva/agent/langgraph_runtime.py` |
-| **TUI Workbench** | Default product entry for chat, tool logs, Trace, model switching, MCP, Workflow, and Self-Evolution | `evolva` |
-| **Tools** | File, shell, Python, web, todo, memory, context, policy, MCP, delegation | `/tools` / `/run` |
-| **Repo Index** | Local semantic repository index with file manifests, incremental reuse, stale detection, and skipped-file diagnostics | `/repo build` / `/repo status` / `/repo search` |
-| **Memory / Skills** | Long-term facts, preferences, lessons, and Markdown playbooks with evidence/status governance | `/memory` / `/skills` |
-| **MCP** | Add stdio MCP servers inside the TUI with `/mcp add`, then inspect/call tools via `/mcp tools` and `mcp_call` | `/mcp` |
-| **Workflow** | JSON workflow specs with role agents, agent calls, and tool nodes, launched from the TUI | `/workflow` |
-| **Trace / Replay** | Prompts, tool calls, policy decisions, latency, errors, outputs, inspectable in the TUI | `/trace` |
-| **Eval Harness** | JSONL tasks with text, regex, artifacts, memory, context, and tool-error checks | CI / Regression |
-| **Guardrails / Sandbox** | Path sandbox, dangerous command denylist, risk scoring, secret detection, approvals | `/policy` |
-| **Self-Evolution** | Turns feedback, trace patterns, and eval failures into memory and skills | `/evolve` / `/dream` |
-| **Dreaming** | Local self-evolution research loop: Evidence → Hypothesis → Candidate → Verifier → Promotion, with auditable reports and an improvement backlog | `/dream` |
+| **TUI Workbench** | One place for chat, tools, traces, model switching, and MCP onboarding | `evolva` |
+| **Repo Index** | Let the agent search files, symbols, and code chunks by repository meaning | `/repo` |
+| **Tools** | Call local tools under policy, sandbox, and trace controls | `/tools` / `/run` |
+| **Workflow / Loop** | Save repeatable engineering tasks with gates, evidence, and resume | `/workflow` / `/loop` |
+| **Trace / Replay** | Keep the proof trail for inputs, tools, decisions, failures, and outputs | `/trace` |
+| **Eval Harness** | Turn agent behavior into regression tests | `evolva eval` |
+| **Memory / Skills** | Promote only governed experience into future context | `/memory` / `/skills` |
+| **Guardrails / Sandbox** | Keep local execution bounded, confirmable, and reviewable | `/policy` |
+| **Self-Evolution** | Distill feedback and failures into reusable lessons | `/evolve` / `/dream` |
 
 ## Architecture
 
@@ -149,9 +146,9 @@ TUI examples:
 /dream verify --promote
 ```
 
-The resulting lessons include **category / confidence / evidence / fingerprint**, are persisted in memory, and can be materialized as Markdown skills for future context injection. `evolve audit` summarizes lesson coverage, evolved skills, pending Trace/Eval proposals, and recommended next steps.
+Evolva turns feedback and failure patterns into traceable lessons, then promotes useful ones into long-term memory or Markdown skills. `evolve audit` shows what has already been learned and which Trace / Eval findings still need attention.
 
-`dream` is Evolva's local self-evolution research loop. It scans recent traces, the latest eval report, and current Memory/Skill coverage, then runs **Evidence → Hypothesis → Candidate → Verifier → Promotion**. Accepted hypotheses become `DreamCandidate` records with affected surfaces, risk, proposed change, and verifier metadata, then land in the runtime home, by default `.evolva/dreams/backlog.json`, as an improvement backlog. By default, `/dream apply` stages high-confidence candidates for verifier review but does not write Memory / Skill. Durable promotion happens through `/dream verify --promote` after local Eval, Trace, or manual verifiers pass. Set `EVOLVA_DREAM_REQUIRE_VERIFICATION=0` only when you intentionally want the legacy immediate-apply behavior.
+`dream` is the more conservative path. It creates improvement candidates first, then requires verifier confirmation before anything becomes durable Memory / Skill. By default, `/dream apply` only stages candidates; `/dream verify --promote` performs the actual promotion.
 
 ## TUI Workbench
 
@@ -228,15 +225,15 @@ Common TUI flows:
 
 ## Workflow Example
 
-Workflow is the low-level DAG execution format. Each run persists status, node outputs, and errors under the runtime home; resume can reuse successful unchanged nodes by fingerprint so a long DAG does not need to restart from zero after a late failure.
+Workflow is the low-level DAG format for explicit dependencies and tool steps. Each run leaves state, outputs, and errors under the runtime home so later Eval / Dream passes can reuse the evidence.
 
-MCP tool discovery persists server schemas in `mcp/tools-cache.json` under the runtime home. If a server is temporarily unavailable, Evolva can degrade to the cached schema. `/mcp health [server]` and `evolva mcp health` report status, tool count, latency, cache age, and errors, and emit `mcp.health` / `mcp.error` metrics.
+MCP is treated as a production integration point: tool schemas are cached, temporary server failures can fall back to known schemas, and `/mcp health` shows status, latency, tool count, and errors.
 
-Memory / Skill governance separates historical retention from prompt injection. Memory is injected only when it is `active` and meets `EVOLVA_MEMORY_CONTEXT_MIN_CONFIDENCE`; `draft`, `quarantined`, and `rolled_back` items remain auditable but do not influence agent behavior. Skills are injected only when their manifest status is `active`; `draft`, `disabled`, `deprecated`, and `quarantined` skills remain traceable but are not selected automatically. Governance tools include `memory_status`, `memory_audit`, `skill_status`, and `skill_audit`.
+Memory / Skill governance separates "stored for audit" from "allowed into the prompt." Draft, quarantined, and rolled-back items remain visible but do not influence agent behavior automatically.
 
-Repo Index builds persist a file manifest, chunk counts, reused-file counts, and skipped-file reasons. Search checks the manifest for staleness, rebuilds only changed files, and reuses unchanged chunks. Runtime artifact directories such as `.evolva/`, legacy `evolva/*` state, and test runtime layouts are ignored so Trace, Memory, and Policy audit writes do not invalidate code search.
+Repo Index remembers what was indexed, what was skipped, and what can be reused. Runtime artifacts are ignored so traces and audit files do not constantly invalidate search.
 
-Multi-agent is a governed role-collaboration layer, not an unbounded autonomous cluster. `delegate_agent` / `collaborate` validate roles, de-duplicate roles, respect `EVOLVA_MULTI_AGENT_MAX_ROLES`, and return structured reports with `run_id`, per-role status, latency, fallback, error details, and `tool_calls`. Sub-agents can call tools from their role allowlist, but every call goes through the main agent's Policy / approval / Sandbox / Trace path. Defaults are intentionally conservative: planner can inspect status, memory, and todos; researcher can read files and search the repo index; coder and reviewer can read/search plus run governed `python_exec`. `EVOLVA_MULTI_AGENT_TOOL_STEPS` controls per-role tool steps. File writes, shell, MCP calls, and recursive delegation are not in the default sub-agent scope. Failed LLM calls degrade to local fallback output and emit `multi_agent.run`, `multi_agent.role`, and `multi_agent.fallback` metrics.
+Multi-agent is governed collaboration, not unbounded autonomy. Sub-agents can call tools inside their role scope, but every call still goes through the main agent's Policy, approval, Sandbox, and Trace path. Writes, shell, MCP calls, and recursive delegation are outside the default sub-agent scope.
 
 ```json
 {
@@ -293,23 +290,21 @@ TUI supports common workstation shortcuts:
 
 ## Safety Model
 
-Evolva is local-first and can execute file, shell, and Python operations, so it ships with multiple guardrails by default:
+Evolva can touch files and run code, so safety is part of the default runtime rather than an optional layer:
 
-- **Sandbox root**: file tools resolve paths through the workspace sandbox to prevent path escape.
-- **Sandbox backend**: local workspace execution is the default; Docker backend can enforce network, read-only root, CPU, memory, and pids limits.
-- **Writable roots**: set `EVOLVA_SANDBOX_WRITABLE_ROOTS` to narrow writable paths, for example to only allow `.evolva/workspace`.
-- **Failure rollback**: failed shell / Python executions roll back files under snapshot roots. Tune with `EVOLVA_SANDBOX_SNAPSHOT_ROOTS` and `EVOLVA_SANDBOX_MAX_SNAPSHOT_BYTES`.
-- **Dangerous command denylist**: blocks patterns such as `rm -rf /`, `git reset --hard`, `mkfs`, and `shutdown`.
-- **Policy engine**: scores shell / Python, network, path, and secret-pattern risks. Set `EVOLVA_POLICY_FILE` to load profile rules, denied capabilities, and command denylists.
-- **Policy audit**: decisions are written to `policy/audit.jsonl` under runtime home, by default `.evolva/policy/audit.jsonl`, so tool allow/deny/confirmation decisions are reviewable.
-- **Confirmation gate**: shell, Python, and MCP tools can require approval unless `--yes` is set.
-- **Trace audit**: decisions, tool calls, failures, and final answers are persisted for review.
+| Boundary | Purpose |
+| --- | --- |
+| Path sandbox | Keep file access inside the workspace |
+| Writable roots | Narrow where changes may be written |
+| Failure rollback | Restore protected files after failed shell / Python runs |
+| Dangerous command blocklist | Stop high-risk command patterns before execution |
+| Policy audit | Record allow, deny, and confirmation decisions |
+| Human confirmation | Require approval for high-risk tools outside `--yes` mode |
+| Trace review | Keep tool calls, failures, and final outputs inspectable |
 
 ## Development
 
-Evolva checks can be wired into CI to protect the Trace / Eval / Self-Evolution regression baseline.
-
-Security evals verify policy audit rows, MCP timeout metrics, sandbox rollback metrics, and secret redaction so production safety signals remain regression-tested.
+Evolva checks can be wired into CI to protect the Trace / Eval / Self-Evolution regression baseline. Security evals keep policy, MCP, sandbox, and redaction behavior from quietly regressing.
 
 ```bash
 PYTHONPYCACHEPREFIX=.pycache python3 -m compileall evolva tests

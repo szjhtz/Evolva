@@ -114,21 +114,18 @@ F4                                     # 快速唤起配置入口
 
 Evolva 的功能按真实使用路径组织：先让 Agent 看懂仓库，再安全执行工具，最后把证据沉淀成可回归的资产。
 
-| 能力 | 说明 | 入口 |
+| 能力 | 你能得到什么 | 入口 |
 | --- | --- | --- |
-| **LangGraph Runtime** | 显式 `StateGraph` 节点：`prepare -> llm -> tool -> observe -> persist -> auto_evolve` | `evolva/agent/langgraph_runtime.py` |
-| **TUI Workbench** | 默认产品入口，集成对话、工具日志、Trace、模型切换、MCP、Workflow 与自我进化 | `evolva` |
-| **Loop Engineering** | 将重复任务抽象为可运行、可设 Gate、可回放、可进化的 Agent Loop | `/loop` |
-| **Tools** | 文件、Shell、Python、Web、Todo、Memory、Context、Policy、MCP、多 Agent 委派 | `/tools` / `/run` |
-| **Repo Index** | 本地语义仓库索引，带文件 manifest、增量复用、stale 检测和 skipped 诊断 | `/repo build` / `/repo status` / `/repo search` |
-| **Memory / Skills** | 带 evidence / status / version 的长期记忆，以及带 manifest trigger / status 的 Markdown playbook | `/memory` / `/skills` |
-| **MCP** | 在 TUI 内通过 `/mcp add` 接入 stdio MCP server，并用 `/mcp tools` / `/mcp health` / `mcp_call` 调用 | `/mcp` |
-| **Workflow** | JSON DAG 编排 role agent、agent call、tool node，支持依赖声明、循环检测与错误门控 | `evolva workflow` / Slash Command |
-| **Trace / Replay** | 记录 prompt、工具调用、policy 决策、耗时、错误与输出，TUI 内查看上下文 | `/trace` |
-| **Eval Harness** | JSONL 任务集 + baseline gate，覆盖文本、正则、产物、记忆、上下文和工具错误，适合 CI/回归 | CI / Regression |
-| **Guardrails / Sandbox** | 路径沙箱、backend 抽象、危险命令拦截、风险分级、secret 检测、确认门禁 | `/policy` |
-| **Self-Evolution** | 从反馈、Trace、Eval 失败中提炼 lesson，并写入 Memory / Skill | `/evolve` / `/dream` |
-| **Dreaming** | 本地自进化研究循环：Evidence → Hypothesis → Candidate → Verifier → Promotion，生成可审计报告与候选改进 Backlog | `/dream` |
+| **TUI Workbench** | 一个界面里完成对话、工具执行、Trace 查看、模型切换和 MCP 接入 | `evolva` |
+| **Repo Index** | 让 Agent 能按仓库语义搜索文件、符号和代码片段 | `/repo` |
+| **Tools** | 受控调用文件、Python、Shell、Web、Todo、Memory、MCP 和子 agent | `/tools` / `/run` |
+| **Loop Engineering** | 把重复工程任务保存成可确认、可运行、可恢复的流程 | `/loop` |
+| **Workflow** | 用 JSON 描述更底层的 DAG 执行流程 | `/workflow` |
+| **Trace / Replay** | 留下每次执行的证据：输入、工具、策略、错误、输出 | `/trace` |
+| **Eval Harness** | 把 Agent 行为变成可回归的 JSONL 测试资产 | `evolva eval` |
+| **Memory / Skills** | 只让经过治理的经验进入上下文，避免记忆污染 | `/memory` / `/skills` |
+| **Guardrails / Sandbox** | 给本地执行加路径边界、风险判断、确认和回滚 | `/policy` |
+| **Self-Evolution** | 从反馈、Trace 和 Eval 失败中沉淀可复用经验 | `/evolve` / `/dream` |
 
 ## 架构总览
 
@@ -180,12 +177,12 @@ TUI 内使用：
 
 这不会立刻改代码。Evolva 会先生成一个可确认的 Loop Draft，包含：
 
-- 需求理解与 intent 类型；
+- 需求理解；
 - 阶段拆解；
 - 检查点；
-- 命令候选和 shell allowlist；
+- 可能需要执行的命令；
 - 风险与开放问题；
-- 有界执行预算，例如 `max_repair_rounds`、`max_duration_seconds`、`max_tool_calls`。
+- 执行预算，例如最多跑多久、最多修几轮、最多调几次工具。
 
 确认流程：
 
@@ -213,21 +210,18 @@ evolva loop execute --json
 
 CLI 中可使用 `evolva loop --yes run <loop> --resume` 从最近失败运行恢复。
 
-为了让 Loop 能直接承载真实工程流水线，Loop 运行现在默认具备几项落地能力：
+为了能承载真实工程任务，Loop 默认有几条底线：
 
-- **运行前校验 / Dry-run**：`/loop validate <loop>` 与 `evolva loop dry-run <loop>` 会在不执行 phase 的情况下检查依赖顺序、Gate 引用、必填命令、工具是否存在、命令 allowlist、timeout/retries 与 Policy 拦截结果。
-- **LLM-first Intent-to-Loop Planner**：`/loop <自然语言需求>` 会优先调用当前配置的 LLM，把需求拆成目标、阶段 DAG、检查点、命令候选、风险和执行预算；LLM 只生成草案，不会直接执行。草案会经过 sanitizer/validator（过滤危险命令、修正依赖、限制预算）后展示给用户确认；未配置模型或 LLM 输出不可解析时，才降级到 heuristic fallback，保证仍可离线开箱使用。
-- **确认后执行，不靠猜**：如果一句话需求仍有开放问题，`/loop approve <确认说明>` 可以把用户补充写入 assumptions/revisions，清空开放问题并重新生成 LoopSpec；执行失败会自动恢复到 `ready_to_run`，用户可修正后重试。
-- **非修改阶段直连 LLM**：设计、复核、最终报告等非修改 phase 默认使用 direct LLM 输出，不进入可调用工具的 agent loop，避免在 todo/context 工具上消耗步骤；上下文扫描和实施阶段仍保留完整工具能力。
-- **有界执行**：生成的 LoopSpec 会携带 `execution_limits`，限制 phase 数、修复轮次、重试次数、总时长、工具调用、命令运行和文件修改规模，避免无限循环；运行器会在执行中硬性拦截超预算的 phase/gate，而不是只做静态校验。
-- **仓库自适应验证**：Planner 会根据本地仓库特征选择可运行的低风险验证命令，例如有 `package.json` 时优先 npm build/test/lint，有 Python 工程或 tests 时优先 pytest；不会在非 Node 仓库里默认强跑 `npm run build`。
-- **命令白名单**：所有 `shell` phase 和 `command_success` gate 必须通过 `command_allowlist`、phase/gate `allowlist` 或前缀通配规则显式放行，同时仍会经过 Evolva Policy 与 Sandbox。未声明 allowlist 的 Loop 会在运行前失败，而不是隐式执行本地命令。
-- **Trace 生命周期**：独立执行 `LoopRunner.run()` 会自动创建 Trace；嵌套在 Agent 对话中的 Loop 会复用当前 Trace，避免覆盖上层审计链路。Loop Report 会记录 `trace_run_id`。
-- **真实质量门**：`command_success` Gate 会通过 Evolva 的 `shell` 工具和确认/策略路径实际执行命令，并把命令、cwd、输出摘要写入 Gate 结果。
-- **工程执行控制**：Phase 支持 `timeout` 与 `retries`。对于 `shell` / `python_exec` 工具阶段，若 args 未显式设置 timeout，会自动下发 phase timeout；每次尝试都会写入运行报告。
-- **失败恢复**：CLI 支持 `evolva loop --yes run <loop> --resume`，会从同一 Loop 最近失败运行中复用 fingerprint 匹配的成功 phase 输出，避免长流程从头重跑；不匹配的 phase 会重新执行。
+| 机制 | 作用 |
+| --- | --- |
+| 先确认再执行 | 自然语言需求会先变成草案，用户确认后才运行 |
+| Dry-run | 执行前检查依赖、命令、工具、预算和策略风险 |
+| 有界运行 | 限制轮次、时长、工具调用和文件改动规模 |
+| 命令白名单 | 需要显式允许的命令才会被执行 |
+| 失败恢复 | 失败后可以 resume，复用已经成功且未变化的阶段 |
+| 证据留存 | 每次运行都会留下 Trace 和 Loop Report |
 
-Loop spec 示例：
+Loop spec 可以很小，例如只描述一个测试阶段：
 
 ```json
 {
@@ -257,9 +251,7 @@ Loop spec 示例：
 }
 ```
 
-命令 allowlist 支持三种匹配：完整命令精确匹配、可执行文件名匹配（如 `python3`）、以及以 `*` 结尾的前缀匹配（如 `.venv/bin/python -m pytest -q*`）。建议生产环境优先使用完整命令或窄前缀，并把 destructive 命令继续交给 Policy/Sandbox 拦截。
-
-Loop 与 Workflow 的边界：Workflow 更像底层 DAG 执行格式；Loop 是面向真实工程习惯的闭环抽象，强调 gate、trace、eval、dream 和长期能力沉淀。
+Loop 与 Workflow 的边界也很简单：Workflow 更像底层 DAG；Loop 更像面向工程工作的闭环任务，强调确认、质量门、证据和可恢复执行。
 
 ## 自我进化：从运行证据到能力资产
 
@@ -300,9 +292,9 @@ TUI 内示例：
 /dream verify --promote
 ```
 
-它会把反馈或失败模式提炼成带 **category / confidence / evidence / fingerprint** 的 lesson，写入长期记忆，并可生成 Markdown Skill。`evolve audit` 会列出 lesson 覆盖、已进化技能、Trace/Eval 待处理 proposal 和下一步建议，避免经验沉淀变成不可控的 prompt 堆叠。
+它会把反馈或失败模式整理成可追溯的 lesson，再沉淀到长期记忆或 Markdown Skill。`evolve audit` 用来检查哪些经验已经沉淀、哪些 Trace / Eval 失败还在等待处理。
 
-`dream` 会扫描最近 Trace、最新 Eval 报告和当前 Memory/Skill 覆盖，执行 **Evidence → Hypothesis → Candidate → Verifier → Promotion**。每个候选改进都会带上影响面、风险、建议动作和 verifier；默认情况下，`/dream apply` 只把高置信候选放入待验证状态，不直接写入 Memory / Skill。只有 `/dream verify --promote` 通过本地 Eval、Trace 或人工 verifier 后，候选才会被提升为长期 Memory / Skill。若需要兼容旧的立即写入行为，可以显式设置 `EVOLVA_DREAM_REQUIRE_VERIFICATION=0`。
+`dream` 是更保守的一层：它先生成候选改进，再要求 verifier 通过后才能提升为长期能力。默认情况下，`/dream apply` 只暂存高置信候选，不直接写入 Memory / Skill；真正沉淀需要 `/dream verify --promote`。
 
 ## TUI 工作台入口
 
@@ -388,9 +380,9 @@ TUI 内常用路径：
 
 ## Workflow 编排
 
-Workflow 是 Evolva 的底层 DAG 执行格式。它支持显式 `depends_on`，执行前会检查重复节点、缺失依赖和循环依赖；执行结果会进入 Context 与 Trace，作为后续 Eval / Dream 的证据来源。每次 Workflow 运行也会在 runtime home 下写入状态、节点输出和错误信息；失败后可用 resume 复用 fingerprint 未变化的成功节点，避免长 DAG 从头重跑。
+Workflow 是 Evolva 的底层 DAG 执行格式，适合描述明确的依赖关系和工具步骤。运行结果会进入 Context 与 Trace，后续 Eval / Dream 可以继续复用这些证据。
 
-MCP 工具发现会把 server schema 缓存在 runtime home 下的 `mcp/tools-cache.json`；server 短暂不可用时可以降级复用已有 cache。`/mcp health [server]` / `evolva mcp health` 会输出状态、工具数量、延迟、cache 年龄和错误，并进入 `mcp.health` / `mcp.error` 指标。
+MCP 接入也按生产使用来处理：工具列表会缓存，server 短暂不可用时可以降级展示已有 schema；`/mcp health` 用来查看连接状态、工具数量、延迟和错误。
 
 ```json
 {
@@ -431,23 +423,23 @@ Trace 和 artifact 也在同一套回归体系里：Trace 使用 `trace.v1` sche
 
 baseline 位于 `evals/baselines/`，CI 配置位于 `.github/workflows/ci.yml`。
 
-Memory / Skill 治理会把“历史留存”和“进入 prompt”分开：Memory 只有 `active` 且达到 `EVOLVA_MEMORY_CONTEXT_MIN_CONFIDENCE` 阈值时才会进入上下文；`draft`、`quarantined`、`rolled_back` 会保留审计记录但不会影响 Agent 行为。Skill 也只注入 `active` manifest，`draft` / `disabled` / `deprecated` / `quarantined` skill 仍可追溯但不会被自动选中。治理入口包括 `memory_status`、`memory_audit`、`skill_status`、`skill_audit`。
+Memory / Skill 治理把“保留下来”和“进入 prompt”分开。草稿、隔离和回滚状态的内容仍可审计，但不会自动影响 Agent 行为。
 
-Repo Index 构建会记录文件 manifest、chunk 数、复用文件数和 skipped 原因；后续搜索会根据 manifest 判断索引是否 stale，文件未变化时复用旧 chunks，运行态目录如 `.evolva/`、legacy `evolva/*` runtime 和测试 runtime 会被排除，避免 Trace/Memory/Policy audit 写入导致索引反复失效。
+Repo Index 会记住哪些文件参与了索引、哪些被跳过、哪些可以复用。运行态目录默认排除，避免 Trace、Memory、Policy audit 的写入让索引反复失效。
 
-Multi-agent 是受控的角色协作层，不是无边界的自治集群。`delegate_agent` / `collaborate` 会校验角色、去重角色、受 `EVOLVA_MULTI_AGENT_MAX_ROLES` 限制，并返回带 `run_id`、角色状态、耗时、fallback、错误信息和 `tool_calls` 的结构化报告。子 agent 可以调用角色 allowlist 内的工具，但所有调用都通过主 agent 的 Policy / 审批 / Sandbox / Trace 通道；默认范围偏保守：planner 只能看状态、记忆和 todo，researcher 可以读文件和查索引，coder / reviewer 可以读文件、查索引并运行受控 `python_exec`。`EVOLVA_MULTI_AGENT_TOOL_STEPS` 控制每个角色最多工具步数；写文件、shell、MCP 调用和递归 delegation 默认不在子 agent 工具范围内。LLM 调用失败时会降级为本地 fallback，并记录 `multi_agent.run` / `multi_agent.role` / `multi_agent.fallback` 指标。
+Multi-agent 是受控协作，不是无边界自治。子 agent 可以调用角色允许范围内的工具，但仍然走主 agent 的 Policy、审批、Sandbox 和 Trace。默认只开放偏安全的读和检查能力；写文件、Shell、MCP 调用和递归 delegation 不在默认范围内。
 
 
 ## 演进路线
 
-Evolva 不提供一个虚高的“万能分数”。它把关键机制拆成可检查、可替换、可扩展的工程层，当前路线聚焦四类生产化方向：
+Evolva 不追求一个虚高的“万能分数”。它更关心每个关键能力是否可检查、可替换、可持续改进：
 
 | 方向 | 当前能力 | 后续演进 |
 | --- | --- | --- |
-| Eval Score | Scorer Registry、多维 weighted score，内置 artifact / trace / command / tool sequence 算子 | 支持更多业务自定义 scorer、LLM-as-judge adapter、跨任务聚合报表 |
-| Trace | `trace.v1` 事件具备 ID/span/parent，可支撑 timeline/DAG | 增强查询索引、跨 run 聚合、交互式可视化 |
-| Sandbox / Artifact | workspace sandbox、policy gate、artifact manifest、sha256/provenance | 扩展容器/进程级隔离、资源限额、网络策略 |
-| Repo / MCP / Loop | Repo Index、stdio MCP、Loop/Dream 证据闭环 | 增量索引、HTTP/SSE MCP、server health、tool schema cache、更多 verifier |
+| Eval | 把行为变成可回归样本 | 更丰富的业务 scorer 和聚合报表 |
+| Trace | 留下完整运行证据 | 更强的查询、聚合和可视化 |
+| Sandbox | 控制本地执行风险 | 更细的资源、网络和隔离策略 |
+| Repo / MCP / Loop | 连接仓库、工具和闭环任务 | 更强的外部工具接入和 verifier |
 
 业务侧的评测数据、领域 scorer、私有工具和安全策略都可以接到这套本地 harness 上，形成自己的 Agent 运行底座。
 
@@ -474,17 +466,17 @@ TUI 支持常见工作台快捷键：
 
 ## 安全与可审计执行
 
-Evolva 是本地优先的 Agent，具备文件、Shell 和 Python 执行能力，因此把安全边界作为运行时的一等公民：
+Evolva 能执行文件、Shell 和 Python，所以安全边界不是附加功能，而是默认运行方式：
 
-- **Sandbox root**：文件工具统一通过 workspace sandbox 解析路径，阻止路径逃逸。
-- **Sandbox backend**：执行层通过 backend 接口隔离，默认本地 workspace backend，也支持 Docker backend 的网络、只读 root、CPU/内存和 pids 限制。
-- **Writable roots**：可用 `EVOLVA_SANDBOX_WRITABLE_ROOTS` 收窄可写路径，例如只允许写 `.evolva/workspace`。
-- **Failure rollback**：Shell / Python 执行失败时会回滚 snapshot 范围内的文件变更；可用 `EVOLVA_SANDBOX_SNAPSHOT_ROOTS` 和 `EVOLVA_SANDBOX_MAX_SNAPSHOT_BYTES` 调整范围与大小。
-- **Dangerous command denylist**：拦截 `rm -rf /`、`git reset --hard`、`mkfs`、`shutdown` 等高危片段。
-- **Policy engine**：对 Shell / Python、网络、路径、secret pattern 进行风险分级；可用 `EVOLVA_POLICY_FILE` 加载 profile 规则、deny capability 和命令 denylist。
-- **Policy audit**：策略决策会进入 runtime home 下的 `policy/audit.jsonl`，默认是 `.evolva/policy/audit.jsonl`，便于审计工具调用是否被允许、拒绝或要求确认。
-- **Confirmation gate**：非 `--yes` 模式下，Shell / Python / MCP 等高风险工具需要确认。
-- **Trace audit**：关键决策、工具调用、失败信息和最终回答都会进入 trace，便于审计和复盘。
+| 边界 | 作用 |
+| --- | --- |
+| 路径沙箱 | 文件访问必须落在 workspace 范围内 |
+| 可写范围 | 可以把写入限制到指定目录 |
+| 失败回滚 | Shell / Python 失败后回滚受保护文件 |
+| 危险命令拦截 | 阻止高危命令片段进入执行 |
+| 策略审计 | 每次允许、拒绝、要求确认都会留下记录 |
+| 人工确认 | 高风险工具在非 `--yes` 模式下需要确认 |
+| Trace 复盘 | 工具调用、失败信息和最终输出都可回看 |
 
 ## 质量基线
 
