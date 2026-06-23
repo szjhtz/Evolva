@@ -255,7 +255,18 @@ Multi-agent is a governed role-collaboration layer, not an unbounded autonomous 
 {"id":"policy_trace_001","input":"Run a tool-backed safety check task","expected_contains":["ok"],"scorers":["no_tool_error"]}
 ```
 
-Supported checks include `expected_contains`, `forbidden_contains`, `expected_regex`, `expected_artifacts`, `expected_memory`, `expected_context`, `max_duration_ms`, and `no_tool_error`.
+Each eval is an auditable behavior contract: the prompt, the expected outcome, and the evidence that proves the agent did the right thing.
+
+Common checks fall into four buckets:
+
+| Bucket | Examples |
+| --- | --- |
+| Output quality | contains, forbidden text, regex |
+| Runtime evidence | trace events, tool sequence, latency |
+| Artifact state | file existence, content, manifest provenance |
+| Safety signals | policy audit, sandbox rollback, MCP timeout, secret redaction |
+
+Baselines live in `evals/baselines/`; CI wiring lives in `.github/workflows/ci.yml`.
 
 ## TUI Preview
 

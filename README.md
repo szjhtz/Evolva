@@ -414,11 +414,22 @@ evolva eval evals/tasks/smoke.jsonl --yes \
   --no-regression
 ```
 
-JSONL 任务不再绑定单一 checklist，而是进入可插拔 Scorer Registry：内置 `contains`、`not_contains`、`regex`、`artifact_exists`、`artifact_contains`、`artifact_manifest`、`json_match`、`memory_contains`、`context_contains`、`trace_event`、`trace_schema`、`metric`、`policy_audit`、`tool_sequence`、`command`、`latency`、`no_tool_error` 等评测算子。每个 check 都会产出 dimension、weight、evidence、expected/actual，并汇总为 weighted score，便于业务方继续接入自定义 rule-based scorer 或 LLM-as-judge。baseline 位于 `evals/baselines/`，CI 配置位于 `.github/workflows/ci.yml`。
+每条 eval 都是一条可审计的行为契约：输入是什么、期待什么、哪些证据算通过。Scorer Registry 负责把这些契约拆成独立检查，并汇总成 weighted score。
 
-Trace 与 artifact 也进入同一套回归体系：Evolva trace 使用 `trace.v1` schema，为每个事件分配 `event_id`、`span_id`、`parent_id`，方便 TUI/可视化层构建 timeline/DAG；写文件等产物会同步进入 runtime home 下的 `artifacts/manifest.jsonl`，默认是 `.evolva/artifacts/manifest.jsonl`，记录 path、sha256、producer、run_id 与 event_id，让 Eval、Replay、Dream 能基于同一份可审计证据工作。
+常用检查分四类：
 
-Security eval 会检查 policy audit、MCP timeout metric、sandbox rollback metric 和 secret redaction，确保安全能力不是只停留在日志里，而是进入 CI 可回归质量门。
+| 类别 | 适合验证 |
+| --- | --- |
+| 文本结果 | 包含 / 禁止包含 / 正则匹配 |
+| 运行证据 | trace event、trace schema、tool sequence、latency |
+| 产物状态 | artifact 是否存在、内容是否匹配、manifest 是否记录来源 |
+| 安全信号 | policy audit、sandbox rollback、MCP timeout、secret redaction |
+
+每个 check 都会记录 dimension、weight、evidence、expected / actual。业务侧可以继续接自定义 rule-based scorer 或 LLM-as-judge，而不用重写整套评测框架。
+
+Trace 和 artifact 也在同一套回归体系里：Trace 使用 `trace.v1` schema，产物写入 `.evolva/artifacts/manifest.jsonl`，Eval、Replay、Dream 都能基于同一份证据工作。
+
+baseline 位于 `evals/baselines/`，CI 配置位于 `.github/workflows/ci.yml`。
 
 Memory / Skill 治理会把“历史留存”和“进入 prompt”分开：Memory 只有 `active` 且达到 `EVOLVA_MEMORY_CONTEXT_MIN_CONFIDENCE` 阈值时才会进入上下文；`draft`、`quarantined`、`rolled_back` 会保留审计记录但不会影响 Agent 行为。Skill 也只注入 `active` manifest，`draft` / `disabled` / `deprecated` / `quarantined` skill 仍可追溯但不会被自动选中。治理入口包括 `memory_status`、`memory_audit`、`skill_status`、`skill_audit`。
 
