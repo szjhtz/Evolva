@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "A TUI-first local self-evolving agent harness with tools, memory, skills, MCP, workflow, trace, eval, and guardrails."
 readme = "README.md"
 requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 dependencies = ["langgraph>=1.2.4", "textual>=0.89.0", "windows-curses>=2.3; sys_platform == 'win32'"]
 
 [tool.setuptools.packages.find]
@@ -12,12 +14,13 @@ exclude = ["assets*", "evals*", "tests*"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "coverage[toml]>=7.0", "ruff>=0.6", "mypy>=1.8", "build>=1.0"]
+credentials = ["keyring>=25"]
 
 [project.scripts]
 evolva = "evolva.cli:main"
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.uv]
@@ -61,5 +64,5 @@ select = ["E4", "E7", "E9", "F"]
 python_version = "3.10"
 ignore_missing_imports = true
 follow_imports = "skip"
-check_untyped_defs = false
+check_untyped_defs = true
 warn_unused_ignores = false

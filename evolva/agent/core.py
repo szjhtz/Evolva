@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+import hashlib
+import json
 from pathlib import Path
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -10,13 +12,14 @@ from evolva.agent.artifacts import ArtifactManifest
 from evolva.agent.dream import DreamEngine
 from evolva.agent.evolution import SelfEvolutionEngine
 from evolva.agent.images import user_content_with_images
-from evolva.agent.llm import OpenAICompatibleLLM
+from evolva.agent.llm import CancellationToken, OpenAICompatibleLLM
 from evolva.agent.memory import MemoryStore
 from evolva.agent.mcp import MCPManager
 from evolva.agent.multi_agent import MultiAgentCoordinator
 from evolva.agent.observability import ObservabilitySink
 from evolva.agent.policy import PolicyConfig, PolicyDecision, PolicyEngine
 from evolva.agent.sandbox import Sandbox, SandboxPolicy
+from evolva.agent.sessions import AgentSession, SessionStore
 from evolva.agent.skills import SkillStore
 from evolva.agent.todo import TodoStore
 from evolva.agent.tracing import TraceRecorder
@@ -54,6 +57,7 @@ class TurnResult:
     tool_logs: list[str] = field(default_factory=list)
     failed_tools: list[str] = field(default_factory=list)
     stopped_by_limit: bool = False
+    cancelled: bool = False
 
 
 @dataclass(frozen=True)
@@ -66,9 +70,16 @@ class EvolvaAgent:
     def __init__(self, config: AgentConfig | None = None, *, assume_yes: bool = False, confirmer: Any | None = None):
         self.config = config or AgentConfig()
         self.config.ensure_dirs()
-        self.memory = MemoryStore(self.config.memory_file, context_min_confidence=self.config.memory_context_min_confidence)
-        self.skills = SkillStore(self.config.skills_dir)
+        self.memory = MemoryStore(
+            self.config.memory_file,
+            context_min_confidence=self.config.memory_context_min_confidence,
+            namespace=self.config.memory_namespace,
+            require_verification=self.config.memory_require_verification,
+        )
+        self.skills = SkillStore(self.config.skills_dir, namespace=self.config.memory_namespace)
         self.context = ContextStore(self.config.context_file)
+        self.sessions = SessionStore(self.config.sessions_dir)
+        self.active_session = self.sessions.ensure_current()
         self.todos = TodoStore(self.config.todo_file)
         self.sandbox = Sandbox(
             SandboxPolicy(
@@ -94,12 +105,24 @@ class EvolvaAgent:
                 self.config.root,
                 self.config.workspace,
                 profile=self.config.profile,
+                allow_shell=self.config.sandbox_allow_shell,
+                execution_isolated=self.sandbox.backend.name != "local",
                 policy_file=self.config.policy_file,
                 audit_file=self.config.policy_audit_file,
             )
         )
-        self.observability = ObservabilitySink(self.config.metrics_file, self.config.alerts_file, enabled=self.config.observability_enabled)
+        self.observability = ObservabilitySink(
+            self.config.metrics_file,
+            self.config.alerts_file,
+            enabled=self.config.observability_enabled,
+            metrics_retention_records=self.config.metrics_retention_records,
+            alerts_retention_records=self.config.alerts_retention_records,
+        )
         self.tracer = TraceRecorder(self.config.traces_dir, enabled=self.config.tracing_enabled, observability=self.observability)
+        self.observability.context_provider = lambda: {
+            "run_id": self.tracer.current_run_id,
+            "session_id": self.active_session.id,
+        }
         self.artifacts = ArtifactManifest(self.config.artifacts_file, self.config.root)
         self.mcp = MCPManager(
             self.config.mcp_config_file,
@@ -133,7 +156,47 @@ class EvolvaAgent:
         self.graph_runtime = EvolvaLangGraphRuntime(self)
         self.assume_yes = assume_yes
         self.confirmer = confirmer
-        self.history: list[dict[str, Any]] = []
+        self.session_approvals: set[str] = set()
+        self.last_llm_usage: dict[str, Any] = {}
+        self.history: list[dict[str, Any]] = [
+            {"role": message.role, "content": message.content}
+            for message in self.active_session.messages[-16:]
+            if message.role in {"user", "assistant"}
+        ]
+
+    def new_session(self, name: str = "New session") -> AgentSession:
+        session = self.sessions.create(name)
+        self._activate_session(session)
+        return session
+
+    def switch_session(self, session_id: str) -> AgentSession:
+        session = self.sessions.load(session_id)
+        if session is None:
+            raise KeyError(f"session not found: {session_id}")
+        self.sessions.set_current(session.id)
+        self._activate_session(session)
+        return session
+
+    def fork_session(self, name: str = "") -> AgentSession:
+        session = self.sessions.fork(self.active_session.id, name)
+        self._activate_session(session)
+        return session
+
+    def rename_session(self, name: str) -> AgentSession:
+        session = self.sessions.rename(self.active_session.id, name)
+        self.active_session = session
+        return session
+
+    def retry_session_prompt(self) -> str:
+        return self.sessions.last_user_message(self.active_session.id)
+
+    def _activate_session(self, session: AgentSession) -> None:
+        self.active_session = session
+        self.history = [
+            {"role": message.role, "content": message.content}
+            for message in session.messages[-16:]
+            if message.role in {"user", "assistant"}
+        ]
 
     def set_model(self, model: str) -> str:
         """Switch the active OpenAI-compatible model for subsequent turns."""
@@ -199,6 +262,7 @@ class EvolvaAgent:
         image_sources: list[str] | None = None,
         llm_timeout: int | None = None,
         execution_bounds: AgentExecutionBounds | None = None,
+        cancellation_token: CancellationToken | None = None,
     ) -> TurnResult:
         meta = {
             "runtime": "langgraph",
@@ -207,6 +271,7 @@ class EvolvaAgent:
             "llm_available": self.llm.available,
             "max_steps": self.config.max_steps,
             "images": image_sources or [],
+            "session_id": self.active_session.id,
         }
         owns_trace = self.tracer.current is None
         if owns_trace:
@@ -229,16 +294,23 @@ class EvolvaAgent:
             return result
 
         self._auto_route_task(user_message)
-        state = self.graph_runtime.run(user_message, image_sources=image_sources, llm_timeout=llm_timeout, execution_bounds=execution_bounds)
+        state = self.graph_runtime.run(
+            user_message,
+            image_sources=image_sources,
+            llm_timeout=llm_timeout,
+            execution_bounds=execution_bounds,
+            cancellation_token=cancellation_token,
+        )
         final = state.get("final", "")
         failed_tools = state.get("failed_tools", [])
         stopped_by_limit = bool(state.get("stopped_by_limit", False))
-        status = "stopped_by_limit" if stopped_by_limit else "completed" if not failed_tools else "completed_with_tool_failures"
+        cancelled = bool(state.get("cancelled", False))
+        status = "cancelled" if cancelled else "stopped_by_limit" if stopped_by_limit else "completed" if not failed_tools else "completed_with_tool_failures"
         if owns_trace:
             self.tracer.end(final, status=status)
         else:
             self.tracer.event("agent_chat_end", {"status": status, "answer": final[:4000], "failed_tools": failed_tools})
-        return TurnResult(answer=final, tool_logs=state.get("tool_logs", []), failed_tools=failed_tools, stopped_by_limit=stopped_by_limit)
+        return TurnResult(answer=final, tool_logs=state.get("tool_logs", []), failed_tools=failed_tools, stopped_by_limit=stopped_by_limit, cancelled=cancelled)
 
     def _auto_route_task(self, user_message: str) -> None:
         if not getattr(self.config, "multi_agent_auto_route", True):
@@ -319,7 +391,7 @@ class EvolvaAgent:
             f"Available tools:\n{self.tools.describe()}\n\n"
             f"Tool scratchpad:\n{scratch or 'No tool calls yet.'}"
         )
-        messages = [{"role": "system", "content": SYSTEM_PROMPT + "\n\n" + context}]
+        messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT + "\n\n" + context}]
         messages.extend(self.history[-8:])
         messages.append({"role": "user", "content": user_content_with_images(user_message, image_sources, root=self.config.root)})
         return messages
@@ -337,12 +409,29 @@ class EvolvaAgent:
             if not policy.allowed:
                 return ToolResult(False, f"Policy denied `{name}`: {policy.reason}", policy.to_dict())
             needs_confirmation = tool.needs_confirmation or policy.requires_confirmation
-            if needs_confirmation and not self.assume_yes:
-                if self.confirmer is not None:
+            if needs_confirmation:
+                approval = self._approval_request(name, args, policy)
+                signature = str(approval["signature"])
+                scope = "session" if signature in self.session_approvals else ""
+                if self.assume_yes:
+                    allowed = True
+                    scope = "automatic"
+                elif scope == "session":
+                    allowed = True
+                elif self.confirmer is not None and hasattr(self.confirmer, "ask_request"):
+                    answer = self.confirmer.ask_request(approval)
+                    scope = str(answer) if answer else "deny"
+                    allowed = scope in {"once", "session", "true"}
+                elif self.confirmer is not None:
                     allowed = bool(self.confirmer.ask(name, args))
+                    scope = "once" if allowed else "deny"
                 else:
-                    reply = input(f"Allow tool `{name}` with args {args}? [y/N] ").strip().lower()
-                    allowed = reply in {"y", "yes"}
+                    reply = input(f"{approval['summary']}\nAllow once [y], for this session [a], or deny [N]? ").strip().lower()
+                    allowed = reply in {"y", "yes", "a", "always"}
+                    scope = "session" if reply in {"a", "always"} else "once" if allowed else "deny"
+                if allowed and scope == "session":
+                    self.session_approvals.add(signature)
+                self.tracer.event("approval_decision", {**approval, "allowed": allowed, "scope": scope})
                 if not allowed:
                     return ToolResult(False, "User denied tool execution")
             import time
@@ -365,6 +454,35 @@ class EvolvaAgent:
         except Exception as exc:
             self.tracer.event("tool_error", {"tool": name, "error": str(exc)})
             return ToolResult(False, f"Tool error: {exc}")
+
+    def _approval_request(self, name: str, args: dict[str, Any], policy: PolicyDecision) -> dict[str, Any]:
+        safe_args = self.tracer.redactor.redact_json(args)
+        paths = [str(args[key]) for key in ("path", "cwd", "output_dir") if args.get(key)]
+        target = ""
+        if args.get("url"):
+            target = str(args["url"])
+        elif args.get("server"):
+            target = f"server={args['server']} tool={args.get('tool', '')}".strip()
+        command = str(args.get("command") or ("python code" if args.get("code") else ""))
+        details = [f"tool={name}", f"risk={policy.risk}", f"reason={policy.reason}"]
+        if paths:
+            details.append("paths=" + ",".join(paths))
+        if target:
+            details.append("target=" + target)
+        if command:
+            details.append("action=" + command[:300])
+        rendered = json.dumps({"tool": name, "args": args}, ensure_ascii=False, sort_keys=True, default=str)
+        return {
+            "tool": name,
+            "risk": policy.risk,
+            "reason": policy.reason,
+            "capabilities": list(policy.capabilities),
+            "args": safe_args,
+            "paths": paths,
+            "target": target,
+            "summary": "Approval required: " + " | ".join(details),
+            "signature": hashlib.sha256(rendered.encode("utf-8")).hexdigest(),
+        }
 
     def _record_tool_artifacts(self, tool_name: str, result: ToolResult, event_id: str) -> None:
         """Persist artifact provenance from tool results into manifest and trace."""

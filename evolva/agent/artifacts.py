@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import builtins
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -78,12 +79,12 @@ class ArtifactManifest:
         self.prune(max_records=self.max_records)
         return record
 
-    def list(self, limit: int | None = None) -> list[ArtifactRecord]:
+    def list(self, limit: int | None = None) -> builtins.list[ArtifactRecord]:
         """Return recorded artifacts, newest last unless limit trims from end."""
 
         if not self.path.exists():
             return []
-        rows: list[ArtifactRecord] = []
+        rows: builtins.list[ArtifactRecord] = []
         for raw in read_jsonl(self.path):
             try:
                 rows.append(ArtifactRecord(**raw))
@@ -93,7 +94,7 @@ class ArtifactManifest:
             return rows[-int(limit) :]
         return rows
 
-    def find(self, artifact_path: str) -> list[ArtifactRecord]:
+    def find(self, artifact_path: str) -> builtins.list[ArtifactRecord]:
         """Find manifest records by project-relative artifact path."""
 
         normalized = artifact_path.replace("\\", "/").lstrip("/")

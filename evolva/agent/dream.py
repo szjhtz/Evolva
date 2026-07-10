@@ -636,7 +636,7 @@ class DreamEngine:
         proposal. Manual-review verifiers stay explicit and never auto-pass.
         """
         backlog = self.load_backlog()
-        candidates = [item for item in backlog.candidates if item.status in {"accepted", "applied", "verified"}]
+        candidates = [item for item in backlog.candidates if item.status in {"accepted", "applied", "verified", "promoted"}]
         candidates = candidates[-limit:]
         trace_analysis: EvolutionAnalysis | None = None
         eval_pass_cache: dict[Path, bool] = {}
@@ -681,6 +681,7 @@ class DreamEngine:
                 result = DreamVerificationResult(candidate.id, False, verifier.type, candidate.status, verifier.expected or "Manual review required.")
 
             candidate.verification = result.to_dict()
+            candidate.verification["experiment_id"] = f"exp_{candidate.id}_{int(time.time())}"
             candidate.updated_at = result.checked_at
             if result.ok and self._status_rank(result.status) > self._status_rank(candidate.status):
                 candidate.status = result.status
@@ -692,6 +693,12 @@ class DreamEngine:
                 if promoted_report is not None:
                     candidate.verification["evolution_fingerprint"] = promoted_report.fingerprint
                     result.detail += f"; promoted_at={candidate.updated_at}"
+            elif not result.ok and candidate.status == "promoted":
+                rollback = self._rollback_candidate(candidate, reason=f"Post-promotion verifier regressed: {result.detail}")
+                candidate.status = "rolled_back"
+                candidate.verification["rollback"] = rollback
+                result.status = "rolled_back"
+                result.detail += "; promoted assets rolled back"
             results.append(result)
 
         if candidates:
@@ -743,7 +750,24 @@ class DreamEngine:
         return backlog
 
     def _status_rank(self, status: str) -> int:
-        return {"rejected": -1, "proposed": 0, "accepted": 1, "applied": 2, "verified": 3, "promoted": 4}.get(status, 0)
+        return {"rejected": -1, "rolled_back": -1, "proposed": 0, "accepted": 1, "applied": 2, "verified": 3, "promoted": 4}.get(status, 0)
+
+    def rollback_candidate(self, candidate_id: str, *, reason: str = "manual Dream rollback") -> dict[str, Any]:
+        backlog = self.load_backlog()
+        candidate = next((item for item in backlog.candidates if item.id == candidate_id), None)
+        if candidate is None:
+            raise KeyError(f"Unknown Dream candidate: {candidate_id}")
+        result = self._rollback_candidate(candidate, reason=reason)
+        candidate.status = "rolled_back"
+        candidate.updated_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        candidate.verification = {**candidate.verification, "rollback": result, "rolled_back_at": candidate.updated_at}
+        self.write_backlog(backlog)
+        return result
+
+    def _rollback_candidate(self, candidate: DreamCandidate, *, reason: str) -> dict[str, Any]:
+        fingerprint = str(candidate.verification.get("evolution_fingerprint") or "")
+        result = self.agent.evolution.rollback_fingerprint(fingerprint, reason=reason)
+        return {**result, "candidate_id": candidate.id, "reason": reason}
 
     def _promote_candidate(self, candidate: DreamCandidate) -> EvolutionReport | None:
         change = candidate.proposed_change or {}

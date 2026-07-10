@@ -17,8 +17,6 @@ DEFAULT_PROFILE_RULES: dict[str, dict[str, Any]] = {
     "safe": {"deny_capabilities": [Capability.RUN_COMMAND.value, Capability.RUN_PYTHON.value, Capability.NETWORK.value, Capability.MCP_CALL.value]},
     "prod": {
         "deny_capabilities": [
-            Capability.RUN_COMMAND.value,
-            Capability.RUN_PYTHON.value,
             Capability.NETWORK.value,
             Capability.MCP_CALL.value,
             Capability.MCP_CONFIG.value,
@@ -58,6 +56,7 @@ class PolicyConfig:
     allow_shell: bool = os.getenv("EVOLVA_POLICY_ALLOW_SHELL", "1") != "0"
     policy_file: Path | None = None
     audit_file: Path | None = None
+    execution_isolated: bool = False
     profile_rules: dict[str, dict[str, Any]] = field(default_factory=dict)
     secret_patterns: list[str] = field(
         default_factory=lambda: [
@@ -125,6 +124,19 @@ class PolicyEngine:
         if Capability.NETWORK in caps and not network_enabled:
             return self._audit(name, PolicyDecision(False, "medium", "Network access is disabled by policy", False, cap_values, [], [*audit_tags, "network_disabled"]))
         if Capability.RUN_COMMAND in caps or Capability.RUN_PYTHON in caps:
+            if profile == "prod" and not self.config.execution_isolated:
+                return self._audit(
+                    name,
+                    PolicyDecision(
+                        False,
+                        "critical",
+                        "Production profile requires an isolated execution backend",
+                        False,
+                        cap_values,
+                        [],
+                        [*audit_tags, "execution_not_isolated"],
+                    ),
+                )
             if not allow_shell:
                 return self._audit(name, PolicyDecision(False, "high", "Shell/Python execution is disabled by policy", False, cap_values, [], [*audit_tags, "shell_disabled"]))
             command = str(args.get("command") or args.get("code") or "")
@@ -152,6 +164,7 @@ class PolicyEngine:
             f"profile={self.config.profile}",
             f"network={'enabled' if self._profile_bool(self.config.profile, 'network_enabled', self.config.network_enabled) else 'disabled'}",
             f"shell={'enabled' if self._profile_bool(self.config.profile, 'allow_shell', self.config.allow_shell) else 'disabled'}",
+            f"execution_isolated={str(self.config.execution_isolated).lower()}",
             f"policy_file={self.config.policy_file or 'not configured'}",
             f"audit_file={self.config.audit_file or 'not configured'}",
             f"secret_patterns={len(self.secret_patterns)}",

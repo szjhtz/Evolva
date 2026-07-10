@@ -21,6 +21,9 @@ class EvalResult:
     score_report: dict[str, Any] = field(default_factory=dict)
     tool_logs: list[str] = field(default_factory=list)
     duration_ms: int = 0
+    model: str = ""
+    usage: dict[str, Any] = field(default_factory=dict)
+    estimated_cost_usd: float = 0.0
 
 
 @dataclass
@@ -37,9 +40,18 @@ class EvalGateResult:
 class EvalHarness:
     """Small stdlib eval harness for agent regression baselines."""
 
-    def __init__(self, config: AgentConfig | None = None, *, assume_yes: bool = True, scorer_registry: ScorerRegistry | None = None):
+    def __init__(
+        self,
+        config: AgentConfig | None = None,
+        *,
+        assume_yes: bool = True,
+        scorer_registry: ScorerRegistry | None = None,
+        require_llm: bool = False,
+    ):
         self.config = config or AgentConfig()
         self.agent = EvolvaAgent(self.config, assume_yes=assume_yes)
+        if require_llm and not self.agent.llm.available:
+            raise RuntimeError("Live eval requires a configured LLM provider")
         self.scorers = scorer_registry or build_default_registry()
         self.results_dir = self.config.eval_results_dir
         self.results_dir.mkdir(parents=True, exist_ok=True)
@@ -58,6 +70,7 @@ class EvalHarness:
 
     def run_task(self, task: dict[str, Any]) -> EvalResult:
         started = time.time()
+        self.agent.last_llm_usage = {}
         trace_run_id = ""
         if "tool" in task:
             tool_name = str(task["tool"])
@@ -76,6 +89,8 @@ class EvalHarness:
             answer = result.answer
             tool_logs = result.tool_logs
         duration_ms = int((time.time() - started) * 1000)
+        usage = dict(self.agent.last_llm_usage)
+        estimated_cost = self._estimated_cost(usage)
         score_report = self.score_report(task, answer, tool_logs, duration_ms=duration_ms, trace_run_id=trace_run_id)
         checks = score_report.booleans()
         passed = score_report.passed if checks else bool(answer.strip())
@@ -89,6 +104,9 @@ class EvalHarness:
             score_report=score_report.to_dict(),
             tool_logs=tool_logs,
             duration_ms=duration_ms,
+            model=self.config.model if self.agent.llm.available else "rule-mode",
+            usage=usage,
+            estimated_cost_usd=estimated_cost,
         )
 
     def score(self, task: dict[str, Any], answer: str, tool_logs: list[str], *, duration_ms: int | None = None) -> dict[str, bool]:
@@ -112,7 +130,7 @@ class EvalHarness:
         ts = time.strftime("%Y%m%d_%H%M%S")
         path = self.results_dir / f"{name}_{ts}.json"
         payload = {
-            "summary": self.summary(results),
+            "summary": self.detailed_summary(results),
             "results": [asdict(r) for r in results],
         }
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -123,7 +141,7 @@ class EvalHarness:
         return {
             "version": 1,
             "name": name,
-            "summary": self.summary(results),
+            "summary": self.detailed_summary(results),
             "tasks": {
                 result.id: {
                     "passed": result.passed,
@@ -143,6 +161,8 @@ class EvalHarness:
         baseline_path: Path | None = None,
         min_score: float | None = None,
         no_regression: bool = False,
+        max_p95_ms: int | None = None,
+        max_cost_usd: float | None = None,
         name: str = "eval",
     ) -> EvalGateResult:
         """Evaluate results against score thresholds and an optional baseline.
@@ -162,6 +182,12 @@ class EvalHarness:
         failed = int(current["summary"].get("failed", 0))
         if failed:
             regressions.append(f"{failed} eval task(s) failed")
+        p95_ms = int(current["summary"].get("p95_duration_ms", 0))
+        if max_p95_ms is not None and p95_ms > max_p95_ms:
+            regressions.append(f"p95 duration {p95_ms}ms exceeds {max_p95_ms}ms")
+        total_cost = float(current["summary"].get("estimated_cost_usd", 0.0))
+        if max_cost_usd is not None and total_cost > max_cost_usd:
+            regressions.append(f"estimated cost ${total_cost:.6f} exceeds ${max_cost_usd:.6f}")
         if baseline and no_regression:
             regressions.extend(self.compare_reports(current, baseline))
         if baseline_path:
@@ -170,6 +196,10 @@ class EvalHarness:
             messages.append(f"min_score={min_score:.3f}")
         if no_regression:
             messages.append("no_regression=true")
+        if max_p95_ms is not None:
+            messages.append(f"max_p95_ms={max_p95_ms}")
+        if max_cost_usd is not None:
+            messages.append(f"max_cost_usd={max_cost_usd:.6f}")
         return EvalGateResult(ok=not regressions, current=current, baseline=baseline, messages=messages, regressions=regressions)
 
     def load_baseline(self, path: Path | None) -> dict[str, Any] | None:
@@ -224,10 +254,35 @@ class EvalHarness:
         return regressions
 
     def summary(self, results: list[EvalResult]) -> dict[str, Any]:
+        """Return the stable, legacy-compatible aggregate result contract."""
         total = len(results)
         passed = sum(1 for r in results if r.passed)
         avg_score = sum(r.score for r in results) / max(1, total)
-        return {"total": total, "passed": passed, "failed": total - passed, "avg_score": avg_score}
+        return {
+            "total": total,
+            "passed": passed,
+            "failed": total - passed,
+            "avg_score": avg_score,
+        }
+
+    def detailed_summary(self, results: list[EvalResult]) -> dict[str, Any]:
+        """Add operational latency, usage, model, and cost dimensions."""
+        summary = self.summary(results)
+        durations = sorted(result.duration_ms for result in results)
+        p95_index = max(0, min(len(durations) - 1, int(len(durations) * 0.95 + 0.999) - 1)) if durations else 0
+        summary.update({
+            "p95_duration_ms": durations[p95_index] if durations else 0,
+            "estimated_cost_usd": sum(result.estimated_cost_usd for result in results),
+            "input_tokens": sum(int(result.usage.get("input_tokens", result.usage.get("prompt_tokens", 0)) or 0) for result in results),
+            "output_tokens": sum(int(result.usage.get("output_tokens", result.usage.get("completion_tokens", 0)) or 0) for result in results),
+            "models": sorted({result.model for result in results if result.model}),
+        })
+        return summary
+
+    def _estimated_cost(self, usage: dict[str, Any]) -> float:
+        input_tokens = float(usage.get("input_tokens", usage.get("prompt_tokens", 0)) or 0)
+        output_tokens = float(usage.get("output_tokens", usage.get("completion_tokens", 0)) or 0)
+        return (input_tokens * self.config.llm_input_cost_per_million + output_tokens * self.config.llm_output_cost_per_million) / 1_000_000
 
 
 def render_results(results: list[EvalResult]) -> str:

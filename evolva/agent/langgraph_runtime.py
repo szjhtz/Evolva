@@ -25,6 +25,8 @@ class EvolvaGraphState(TypedDict, total=False):
     route: str
     llm_timeout: int
     execution_bounds: Any
+    cancellation_token: Any
+    cancelled: bool
 
 
 class EvolvaLangGraphRuntime:
@@ -48,6 +50,7 @@ class EvolvaLangGraphRuntime:
         image_sources: list[str] | None = None,
         llm_timeout: int | None = None,
         execution_bounds: Any | None = None,
+        cancellation_token: Any | None = None,
     ) -> EvolvaGraphState:
         initial: EvolvaGraphState = {
             "user_message": user_message,
@@ -67,6 +70,8 @@ class EvolvaLangGraphRuntime:
             initial["llm_timeout"] = int(llm_timeout)
         if execution_bounds is not None:
             initial["execution_bounds"] = execution_bounds
+        if cancellation_token is not None:
+            initial["cancellation_token"] = cancellation_token
         return self.graph.invoke(initial)
 
     def _build_graph(self):
@@ -89,6 +94,9 @@ class EvolvaLangGraphRuntime:
 
     def _prepare(self, state: EvolvaGraphState) -> dict[str, Any]:
         self.agent.tracer.event("langgraph_node", {"node": "prepare"})
+        token = state.get("cancellation_token")
+        if token is not None and token.cancelled:
+            return {"route": "persist", "final": "Run cancelled.", "cancelled": True}
         return {"route": "llm"}
 
     def _route_after_prepare(self, state: EvolvaGraphState) -> Literal["llm", "persist"]:
@@ -103,15 +111,29 @@ class EvolvaLangGraphRuntime:
             {"node": "llm", "step": step, "scratch_chars": len(scratch)},
         )
         self.agent.tracer.event("prompt", {"message_count": len(messages), "scratch_chars": len(scratch), "system_chars": len(messages[0]["content"])})
-        timeout = int(state.get("llm_timeout") or getattr(self.agent.config, "request_timeout", 180))
+        raw_timeout = state.get("llm_timeout")
+        timeout = int(raw_timeout) if raw_timeout is not None else int(self.agent.config.request_timeout)
         started = time.time()
+        token = state.get("cancellation_token")
+        if token is not None and token.cancelled:
+            return {"step": step, "final": "Run cancelled.", "route": "persist", "cancelled": True}
         try:
-            response = self.agent.llm.chat(messages, timeout=timeout)
+            response = self.agent.llm.chat(messages, timeout=timeout, cancellation_token=token)
         except TypeError as exc:
-            if "timeout" not in str(exc):
+            error = str(exc)
+            if "cancellation_token" in error:
+                response = self.agent.llm.chat(messages, timeout=timeout)
+            elif "timeout" in error:
+                response = self.agent.llm.chat(messages, cancellation_token=token) if token is not None else self.agent.llm.chat(messages)
+            else:
                 raise
-            response = self.agent.llm.chat(messages)
+        except RuntimeError as exc:
+            if "cancelled" not in str(exc).lower():
+                raise
+            return {"step": step, "final": "Run cancelled.", "route": "persist", "cancelled": True}
         raw = response.content
+        usage = getattr(response, "usage", None)
+        self.agent.last_llm_usage = dict(usage) if isinstance(usage, dict) else {}
         self.agent.tracer.event(
             "llm_response",
             {
@@ -120,6 +142,10 @@ class EvolvaLangGraphRuntime:
                 "attempts": getattr(response, "attempts", 1),
                 "retries": getattr(response, "retries", 0),
                 "model": getattr(self.agent.config, "model", ""),
+                "provider_model": getattr(response, "model", ""),
+                "request_id": getattr(response, "request_id", ""),
+                "finish_reason": getattr(response, "finish_reason", ""),
+                "usage": usage,
             },
         )
         action = extract_json_object(raw)
@@ -142,6 +168,9 @@ class EvolvaLangGraphRuntime:
         return "persist"
 
     def _tool(self, state: EvolvaGraphState) -> dict[str, Any]:
+        token = state.get("cancellation_token")
+        if token is not None and token.cancelled:
+            return {"final": "Run cancelled.", "route": "persist", "cancelled": True}
         name = state.get("last_tool_name") or ""
         args = state.get("last_tool_args") or {}
         self.agent.tracer.event("langgraph_node", {"node": "tool", "tool": name})
@@ -185,6 +214,11 @@ class EvolvaLangGraphRuntime:
         history_user = user_message if not image_sources else f"{user_message}\n[Images: {', '.join(image_sources)}]"
         self.agent.history.append({"role": "user", "content": history_user})
         self.agent.history.append({"role": "assistant", "content": final})
+        self.agent.sessions.append(self.agent.active_session.id, "user", history_user)
+        self.agent.sessions.append(self.agent.active_session.id, "assistant", final)
+        refreshed = self.agent.sessions.load(self.agent.active_session.id)
+        if refreshed is not None:
+            self.agent.active_session = refreshed
         self.agent.context.add("message", history_user, role="user")
         self.agent.context.add("message", final, role="assistant")
         self.agent.tracer.event("context_write", {"items": 2})

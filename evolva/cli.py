@@ -14,6 +14,7 @@ from evolva.config import AgentConfig
 from evolva.eval.taskset import taskset_smoke_report, render_taskset_smoke_report, run_taskset_sample, write_taskset_report
 from evolva.tools import taskset as taskset_tools
 from evolva.agent.mcp_presets import parse_env_pairs
+from evolva.agent.state_migration import StateMigrator
 from evolva.eval.harness import EvalHarness, render_gate, render_results
 from evolva.loops import LoopDraftSession, LoopRunner, render_confirmed_draft, render_loop_draft, render_loop_result, render_loop_specs, render_loop_validation, validate_loop_spec
 from evolva.loops.planner import is_natural_language_loop
@@ -168,8 +169,12 @@ def handle_command(agent: EvolvaAgent, line: str) -> bool:
             print(agent.observability.render_alerts())
         elif rest in {"prometheus", "export"}:
             print(agent.observability.render_prometheus(), end="")
+        elif rest == "otlp":
+            print(agent.observability.render_otlp_json())
+        elif rest == "prune":
+            print(json.dumps(agent.observability.prune(), ensure_ascii=False))
         else:
-            print("Usage: /metrics | /metrics alerts | /metrics prometheus")
+            print("Usage: /metrics | /metrics alerts | /metrics prometheus | /metrics otlp | /metrics prune")
         return True
     if line.startswith("/sandbox"):
         rest = line.removeprefix("/sandbox").strip()
@@ -234,8 +239,8 @@ def handle_command(agent: EvolvaAgent, line: str) -> bool:
         parts = shlex.split(rest)
         image = parts[0]
         question = " ".join(parts[1:]) or "请分析这张图片。"
-        result = agent.chat(question, image_sources=[image])
-        print(result.answer)
+        image_result = agent.chat(question, image_sources=[image])
+        print(image_result.answer)
         return True
     if line.startswith("/evolve"):
         feedback = line.removeprefix("/evolve").strip()
@@ -294,6 +299,9 @@ def handle_command(agent: EvolvaAgent, line: str) -> bool:
                     tasks_path = agent.sandbox.resolve(parts[idx + 1])
             print(engine.render_verification(engine.verify_backlog(tasks_path=tasks_path, limit=limit, promote=promote)))
             return True
+        if parts and parts[0] == "rollback" and len(parts) >= 2:
+            print(json.dumps(engine.rollback_candidate(parts[1]), ensure_ascii=False, indent=2))
+            return True
         apply = bool(parts and parts[0] in {"apply", "--apply"})
         limit = 20
         report_path = None
@@ -305,8 +313,8 @@ def handle_command(agent: EvolvaAgent, line: str) -> bool:
                 report_path = agent.sandbox.resolve(parts[idx + 1])
             elif part in {"--min-confidence", "--threshold"} and idx + 1 < len(parts):
                 min_confidence = float(parts[idx + 1])
-        report = engine.run(trace_limit=limit, eval_report=report_path, apply=apply, min_confidence=min_confidence)
-        print(engine.render(report))
+        dream_report = engine.run(trace_limit=limit, eval_report=report_path, apply=apply, min_confidence=min_confidence)
+        print(engine.render(dream_report))
         return True
     if line.startswith("/loop"):
         rest = line.removeprefix("/loop").strip()
@@ -342,12 +350,12 @@ def handle_command(agent: EvolvaAgent, line: str) -> bool:
                 print("Active Loop draft is not ready. Run `/loop confirm` first and resolve validation/open-question issues.")
                 return True
             session.mark_running()
-            result = runner.run(draft.loop_spec)
-            if result.ok:
+            loop_result = runner.run(draft.loop_spec)
+            if loop_result.ok:
                 session.mark_completed()
             else:
                 session.restore_ready()
-            print(render_loop_result(result))
+            print(render_loop_result(loop_result))
             return True
         if rest.startswith("save"):
             path = session.save_loop(rest.removeprefix("save").strip())
@@ -381,11 +389,11 @@ def handle_command(agent: EvolvaAgent, line: str) -> bool:
         print("Usage: /loop <request> | /loop plan <request> | /loop revise <feedback> | /loop approve <confirmation> | /loop show-draft | /loop confirm | /loop execute | /loop save <name> | /loop cancel | /loop list/show/validate/dry-run/run")
         return True
     if line.startswith("/workflow"):
-        path = line.removeprefix("/workflow").strip()
-        if not path:
+        workflow_spec_path = line.removeprefix("/workflow").strip()
+        if not workflow_spec_path:
             print("Usage: /workflow <json-spec-path>")
             return True
-        output = WorkflowEngine(agent).run_file(agent.sandbox.resolve(path))
+        output = WorkflowEngine(agent).run_file(agent.sandbox.resolve(workflow_spec_path))
         print("\n".join(output.logs))
         print(f"Workflow {output.workflow_id}: {'ok' if output.ok else 'failed'}")
         return True
@@ -480,7 +488,22 @@ def metrics_cmd(args: argparse.Namespace) -> int:
     if args.metrics_cmd == "prometheus":
         print(agent.observability.render_prometheus(), end="")
         return 0
+    if args.metrics_cmd == "otlp":
+        print(agent.observability.render_otlp_json(limit=args.limit))
+        return 0
+    if args.metrics_cmd == "prune":
+        print(json.dumps(agent.observability.prune(), ensure_ascii=False))
+        return 0
     raise SystemExit("unknown metrics command")
+
+
+def migrate_cmd(args: argparse.Namespace) -> int:
+    config = config_from_args(args)
+    report = StateMigrator(config.runtime_home).run(apply=args.apply)
+    print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+    if not args.apply and report.changed_files:
+        print("Dry run only. Re-run with `--apply` to rewrite redacted state.")
+    return 1 if report.errors else 0
 
 
 def sandbox_cmd(args: argparse.Namespace) -> int:
@@ -496,7 +519,11 @@ def sandbox_cmd(args: argparse.Namespace) -> int:
 
 
 def eval_cmd(args: argparse.Namespace) -> int:
-    harness = EvalHarness(config_from_args(args), assume_yes=args.yes)
+    try:
+        harness = EvalHarness(config_from_args(args), assume_yes=args.yes, require_llm=args.require_llm)
+    except RuntimeError as exc:
+        print(str(exc))
+        return 2
     results = harness.run_file(args.tasks)
     print(render_results(results))
     gate = harness.gate(
@@ -504,6 +531,8 @@ def eval_cmd(args: argparse.Namespace) -> int:
         baseline_path=args.baseline,
         min_score=args.min_score,
         no_regression=args.no_regression,
+        max_p95_ms=args.max_p95_ms,
+        max_cost_usd=args.max_cost_usd,
         name=args.tasks.stem,
     )
     if args.baseline or args.min_score is not None or args.no_regression:
@@ -710,6 +739,9 @@ def dream_cmd(args: argparse.Namespace) -> int:
         else:
             print(engine.render_verification(results))
         return 0 if all(item.ok for item in results) else 1
+    if getattr(args, "dream_cmd", None) == "rollback":
+        print(json.dumps(engine.rollback_candidate(args.candidate_id, reason=args.reason), ensure_ascii=False, indent=2))
+        return 0
     report_path = args.report
     report = engine.run(trace_limit=args.limit, eval_report=report_path, apply=args.apply, min_confidence=args.min_confidence)
     if args.json:
@@ -828,7 +860,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-tools", action="store_true", help="Hide the TUI tool log panel at startup")
     parser.add_argument("--fullscreen", action="store_true", help="Use the legacy full-screen curses TUI")
     parser.add_argument("--root", type=Path, help="Project root for sandbox, runtime state, traces, memory, and repo index; defaults to the current directory or EVOLVA_ROOT")
-    sub = parser.add_subparsers(dest="cmd", required=False, metavar="{tui,ask,trace,metrics,sandbox,eval,taskset,evolve,optimize,dream,loop,workflow,mcp}")
+    sub = parser.add_subparsers(dest="cmd", required=False, metavar="{tui,ask,trace,metrics,migrate,sandbox,eval,taskset,evolve,optimize,dream,loop,workflow,mcp}")
     tui_p = sub.add_parser("tui", help="Open the Evolva TUI workbench explicitly")
     tui_p.add_argument("--yes", action="store_true", help="Approve shell/python tools without prompting")
     tui_p.add_argument("--no-tools", action="store_true", help="Hide the tool log panel at startup")
@@ -867,6 +899,17 @@ def build_parser() -> argparse.ArgumentParser:
     metrics_alerts.set_defaults(func=metrics_cmd)
     metrics_prometheus = metrics_sub.add_parser("prometheus", help="Export metrics as Prometheus text")
     metrics_prometheus.set_defaults(func=metrics_cmd)
+    metrics_otlp = metrics_sub.add_parser("otlp", help="Export recent metrics as OTLP-shaped JSON")
+    metrics_otlp.add_argument("--limit", type=int, default=1000)
+    metrics_otlp.set_defaults(func=metrics_cmd)
+    metrics_prune = metrics_sub.add_parser("prune", help="Apply configured local metric and alert retention")
+    metrics_prune.set_defaults(func=metrics_cmd)
+
+    migrate_p = sub.add_parser("migrate", help="Audit or migrate local runtime state")
+    migrate_sub = migrate_p.add_subparsers(dest="migrate_cmd", required=True)
+    migrate_state = migrate_sub.add_parser("state", help="Redact secrets from legacy JSON/JSONL runtime state")
+    migrate_state.add_argument("--apply", action="store_true", help="Atomically rewrite changed files; default is dry-run")
+    migrate_state.set_defaults(func=migrate_cmd)
 
     sandbox_p = sub.add_parser("sandbox", help="Automation: inspect and smoke-test the configured sandbox backend")
     sandbox_sub = sandbox_p.add_subparsers(dest="sandbox_cmd", required=True)
@@ -882,6 +925,9 @@ def build_parser() -> argparse.ArgumentParser:
     eval_p.add_argument("--baseline", type=lambda s: __import__("pathlib").Path(s), help="Compare against a checked-in eval baseline JSON")
     eval_p.add_argument("--min-score", type=float, help="Require the average eval score to be at least this value")
     eval_p.add_argument("--no-regression", action="store_true", help="Fail if any baseline task regresses")
+    eval_p.add_argument("--require-llm", action="store_true", help="Fail fast unless a live LLM provider is configured")
+    eval_p.add_argument("--max-p95-ms", type=int, help="Fail when task p95 latency exceeds this threshold")
+    eval_p.add_argument("--max-cost-usd", type=float, help="Fail when estimated aggregate model cost exceeds this threshold")
     eval_p.set_defaults(func=eval_cmd)
 
     taskset_p = sub.add_parser("taskset", help="Automation: inspect and dry-run task-set rows")
@@ -960,6 +1006,10 @@ def build_parser() -> argparse.ArgumentParser:
     dream_verify.add_argument("--promote", action="store_true", help="Promote verified candidates in the Dream backlog")
     dream_verify.add_argument("--json", action="store_true", help="Print verifier results as JSON")
     dream_verify.set_defaults(func=dream_cmd)
+    dream_rollback = dream_sub.add_parser("rollback", help="Deactivate assets promoted by one Dream candidate")
+    dream_rollback.add_argument("candidate_id")
+    dream_rollback.add_argument("--reason", default="manual Dream rollback")
+    dream_rollback.set_defaults(func=dream_cmd)
     dream_p.add_argument("--apply", action="store_true", help="Stage high-confidence proposals for verifier review")
     dream_p.add_argument("--limit", type=int, default=20, help="Recent trace run limit")
     dream_p.add_argument("--report", type=lambda s: __import__("pathlib").Path(s), help="Eval report JSON; defaults to latest")

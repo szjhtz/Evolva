@@ -14,6 +14,22 @@ from typing import Any
 from evolva.storage import atomic_write_json, read_json
 
 
+DEFAULT_MCP_ENV_ALLOWLIST = (
+    "PATH",
+    "HOME",
+    "USER",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "LANG",
+    "LC_ALL",
+    "SYSTEMROOT",
+    "WINDIR",
+    "COMSPEC",
+    "PATHEXT",
+)
+
+
 @dataclass
 class MCPServerConfig:
     name: str
@@ -24,6 +40,22 @@ class MCPServerConfig:
     enabled: bool = True
     request_timeout: int = 30
     max_message_bytes: int = 2_000_000
+    inherit_env: bool = False
+    env_allowlist: list[str] = field(default_factory=lambda: list(DEFAULT_MCP_ENV_ALLOWLIST))
+    trust_level: str = "untrusted"
+    allowed_tools: list[str] = field(default_factory=list)
+    denied_tools: list[str] = field(default_factory=list)
+    isolation: str = "host"
+    container_image: str = "python:3.12-slim"
+    container_network: str = "none"
+
+    def __post_init__(self) -> None:
+        self.trust_level = self.trust_level.strip().lower() or "untrusted"
+        if self.trust_level not in {"untrusted", "trusted"}:
+            raise ValueError(f"invalid MCP trust level: {self.trust_level}")
+        self.isolation = self.isolation.strip().lower() or "host"
+        if self.isolation not in {"host", "docker"}:
+            raise ValueError(f"invalid MCP isolation backend: {self.isolation}")
 
 
 class MCPClient:
@@ -42,18 +74,51 @@ class MCPClient:
     def start(self) -> None:
         if self.proc and self.proc.poll() is None:
             return
-        env = os.environ.copy()
-        env.update(self.config.env)
+        env = self._child_env()
         cwd = self.config.cwd or str(self.root)
+        command, process_cwd = self._process_command(Path(cwd), env)
         self.proc = subprocess.Popen(
-            [self.config.command, *self.config.args],
-            cwd=cwd,
+            command,
+            cwd=process_cwd,
             env=env,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
         self._start_stderr_reader()
+
+    def _process_command(self, cwd: Path, env: dict[str, str]) -> tuple[list[str], str | None]:
+        if self.config.isolation == "host":
+            return [self.config.command, *self.config.args], str(cwd)
+        root = self.root.expanduser().resolve()
+        try:
+            relative_cwd = cwd.expanduser().resolve().relative_to(root)
+            container_cwd = str(Path("/workspace") / relative_cwd)
+        except ValueError:
+            container_cwd = "/workspace"
+        command = [
+            "docker", "run", "--rm", "-i",
+            "--network", self.config.container_network,
+            "--read-only", "--cap-drop", "ALL",
+            "--security-opt", "no-new-privileges:true",
+            "--pids-limit", "128",
+            "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
+            "-v", f"{root}:/workspace:ro",
+            "-w", container_cwd,
+        ]
+        for key in sorted(env):
+            command.extend(["-e", key])
+        command.extend([self.config.container_image, self.config.command, *self.config.args])
+        return command, None
+
+    def _child_env(self) -> dict[str, str]:
+        if self.config.inherit_env:
+            env = os.environ.copy()
+        else:
+            allowed = set(self.config.env_allowlist or DEFAULT_MCP_ENV_ALLOWLIST)
+            env = {key: value for key, value in os.environ.items() if key in allowed}
+        env.update(self.config.env)
+        return env
 
     def close(self) -> None:
         if self.proc and self.proc.poll() is None:
@@ -89,6 +154,10 @@ class MCPClient:
         return list(result.get("result", {}).get("tools", []))
 
     def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+        if self.config.allowed_tools and name not in self.config.allowed_tools:
+            raise PermissionError(f"MCP tool `{name}` is not allowlisted for server `{self.config.name}`")
+        if name in self.config.denied_tools:
+            raise PermissionError(f"MCP tool `{name}` is denied for server `{self.config.name}`")
         self.initialize()
         result = self.request("tools/call", {"name": name, "arguments": arguments or {}})
         if "error" in result:
@@ -226,6 +295,14 @@ class MCPManager:
                 enabled=bool(item.get("enabled", True)),
                 request_timeout=int(item.get("request_timeout", 30)),
                 max_message_bytes=int(item.get("max_message_bytes", 2_000_000)),
+                inherit_env=bool(item.get("inherit_env", False)),
+                env_allowlist=[str(value) for value in item.get("env_allowlist", DEFAULT_MCP_ENV_ALLOWLIST)],
+                trust_level=str(item.get("trust_level", "untrusted")),
+                allowed_tools=[str(value) for value in item.get("allowed_tools", [])],
+                denied_tools=[str(value) for value in item.get("denied_tools", [])],
+                isolation=str(item.get("isolation", "host")),
+                container_image=str(item.get("container_image", "python:3.12-slim")),
+                container_network=str(item.get("container_network", "none")),
             )
         return servers
 
@@ -243,6 +320,14 @@ class MCPManager:
         enabled: bool = True,
         request_timeout: int = 30,
         max_message_bytes: int = 2_000_000,
+        inherit_env: bool = False,
+        env_allowlist: list[str] | None = None,
+        trust_level: str = "untrusted",
+        allowed_tools: list[str] | None = None,
+        denied_tools: list[str] | None = None,
+        isolation: str = "host",
+        container_image: str = "python:3.12-slim",
+        container_network: str = "none",
     ) -> MCPServerConfig:
         """Persist and activate a stdio MCP server configuration.
 
@@ -265,6 +350,14 @@ class MCPManager:
             "enabled": bool(enabled),
             "request_timeout": int(request_timeout),
             "max_message_bytes": int(max_message_bytes),
+            "inherit_env": bool(inherit_env),
+            "env_allowlist": list(env_allowlist or DEFAULT_MCP_ENV_ALLOWLIST),
+            "trust_level": trust_level,
+            "allowed_tools": list(allowed_tools or []),
+            "denied_tools": list(denied_tools or []),
+            "isolation": isolation,
+            "container_image": container_image,
+            "container_network": container_network,
         }
         if cwd:
             servers[name]["cwd"] = cwd
@@ -278,6 +371,14 @@ class MCPManager:
             enabled=enabled,
             request_timeout=int(request_timeout),
             max_message_bytes=int(max_message_bytes),
+            inherit_env=bool(inherit_env),
+            env_allowlist=list(env_allowlist or DEFAULT_MCP_ENV_ALLOWLIST),
+            trust_level=trust_level,
+            allowed_tools=list(allowed_tools or []),
+            denied_tools=list(denied_tools or []),
+            isolation=isolation,
+            container_image=container_image,
+            container_network=container_network,
         )
         self.servers[name] = config
         if name in self.clients:
@@ -360,6 +461,12 @@ class MCPManager:
                     "latency_ms": latency_ms,
                     "request_timeout": config.request_timeout,
                     "max_message_bytes": config.max_message_bytes,
+                    "inherit_env": config.inherit_env,
+                    "trust_level": config.trust_level,
+                    "allowed_tools": list(config.allowed_tools),
+                    "denied_tools": list(config.denied_tools),
+                    "isolation": config.isolation,
+                    "production_ready": config.isolation == "docker",
                     "error": error,
                 }
             )

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
+import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -59,6 +60,7 @@ class TraceRecorder:
         self.observability = observability
         self.current: TraceRun | None = None
         self._event_seq = 0
+        self._lock = threading.RLock()
         self.traces_dir.mkdir(parents=True, exist_ok=True)
 
     @property
@@ -68,7 +70,7 @@ class TraceRecorder:
     def start(self, user_input: str, *, meta: dict[str, Any] | None = None) -> str:
         run_id = time.strftime("run_%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:8]
         self._event_seq = 0
-        self.current = TraceRun(run_id=run_id, started_at=time.time(), user_input=user_input)
+        self.current = TraceRun(run_id=run_id, started_at=time.time(), user_input=self.redactor.redact_text(user_input))
         if meta:
             self.event("run_meta", meta, parent_id="")
         return run_id
@@ -89,22 +91,25 @@ class TraceRecorder:
 
         if not self.enabled or self.current is None:
             return None
-        self._event_seq += 1
-        event_id = f"evt_{self._event_seq:04d}"
-        if span_id is None:
-            safe_kind = "".join(ch if ch.isalnum() else "_" for ch in kind.lower()).strip("_") or "event"
-            span_id = f"span_{safe_kind}_{self._event_seq:04d}"
-        if parent_id is None:
-            parent_id = self.current.events[-1].event_id if self.current.events else ""
-        event = TraceEvent(
-            ts=time.time(),
-            kind=kind,
-            data=self.redactor.redact_json(data or {}),
-            event_id=event_id,
-            span_id=span_id,
-            parent_id=parent_id,
-        )
-        self.current.events.append(event)
+        with self._lock:
+            if self.current is None:
+                return None
+            self._event_seq += 1
+            event_id = f"evt_{self._event_seq:04d}"
+            if span_id is None:
+                safe_kind = "".join(ch if ch.isalnum() else "_" for ch in kind.lower()).strip("_") or "event"
+                span_id = f"span_{safe_kind}_{self._event_seq:04d}"
+            if parent_id is None:
+                parent_id = self.current.events[-1].event_id if self.current.events else ""
+            event = TraceEvent(
+                ts=time.time(),
+                kind=kind,
+                data=self.redactor.redact_json(data or {}),
+                event_id=event_id,
+                span_id=span_id,
+                parent_id=parent_id,
+            )
+            self.current.events.append(event)
         self._record_observability(event)
         return event_id
 
@@ -315,10 +320,28 @@ class TraceRecorder:
             elif event.kind == "artifact_error":
                 self.observability.record("artifact.error", tags={"tool": data.get("tool", "")}, fields={"error": str(data.get("error", ""))[:1000]})
             elif event.kind == "llm_response":
-                tags = {"model": data.get("model", "")}
+                tags = {"model": data.get("provider_model") or data.get("model", "")}
                 latency = data.get("latency_ms")
                 if latency is not None:
-                    self.observability.record("llm.latency_ms", value=float(latency), unit="ms", tags=tags)
+                    self.observability.record(
+                        "llm.latency_ms",
+                        value=float(latency),
+                        unit="ms",
+                        tags=tags,
+                        fields={"request_id": data.get("request_id", ""), "finish_reason": data.get("finish_reason", "")},
+                    )
+                usage = data.get("usage") or {}
+                if isinstance(usage, dict):
+                    for source, metric in (
+                        ("prompt_tokens", "llm.input_tokens"),
+                        ("input_tokens", "llm.input_tokens"),
+                        ("completion_tokens", "llm.output_tokens"),
+                        ("output_tokens", "llm.output_tokens"),
+                        ("total_tokens", "llm.total_tokens"),
+                    ):
+                        value = usage.get(source)
+                        if isinstance(value, (int, float)):
+                            self.observability.record(metric, value=float(value), unit="token", tags=tags)
                 retries = int(data.get("retries") or 0)
                 if retries > 0:
                     self.observability.record("llm.retry", value=retries, tags=tags, fields={"attempts": data.get("attempts", 1)})

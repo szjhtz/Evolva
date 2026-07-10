@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from difflib import SequenceMatcher
 
+from evolva.agent.redaction import Redactor
 from evolva.storage import append_jsonl, atomic_write_jsonl, read_jsonl
 
 
@@ -27,6 +28,10 @@ class MemoryItem:
     status: str = "active"
     version: int = 1
     supersedes: str = ""
+    namespace: str = "default"
+    expires_at: float = 0.0
+    verified: bool = False
+    conflicts_with: list[str] | None = None
 
     def __post_init__(self) -> None:
         self.kind = self.kind.strip() or "fact"
@@ -39,15 +44,28 @@ class MemoryItem:
             self.ts = time.time()
         if self.evidence is None:
             self.evidence = []
+        if self.conflicts_with is None:
+            self.conflicts_with = []
         if not self.id:
             base = f"{self.kind}\n{self.content}\n{self.source}\n{self.ts:.6f}"
             self.id = hashlib.sha256(base.encode("utf-8")).hexdigest()[:16]
 
 
 class MemoryStore:
-    def __init__(self, path: Path, *, context_min_confidence: float = DEFAULT_CONTEXT_MIN_CONFIDENCE):
+    def __init__(
+        self,
+        path: Path,
+        *,
+        context_min_confidence: float = DEFAULT_CONTEXT_MIN_CONFIDENCE,
+        namespace: str = "default",
+        require_verification: bool = False,
+        redactor: Redactor | None = None,
+    ):
         self.path = path
         self.context_min_confidence = max(0.0, min(1.0, float(context_min_confidence)))
+        self.namespace = namespace.strip() or "default"
+        self.require_verification = bool(require_verification)
+        self.redactor = redactor or Redactor()
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def add(
@@ -60,8 +78,26 @@ class MemoryStore:
         evidence: list[str] | None = None,
         status: str = "active",
         supersedes: str = "",
+        namespace: str | None = None,
+        expires_at: float = 0.0,
+        verified: bool = False,
     ) -> MemoryItem:
-        item = MemoryItem(kind=kind, content=content.strip(), confidence=confidence, source=source, evidence=evidence or [], status=status, supersedes=supersedes)
+        safe_content = self.redactor.redact_text(content.strip())
+        safe_evidence = self.redactor.redact_json(evidence or [])
+        conflicts = self.find_conflicts(kind, safe_content, namespace=namespace)
+        item = MemoryItem(
+            kind=kind,
+            content=safe_content,
+            confidence=confidence,
+            source=self.redactor.redact_text(source),
+            evidence=[str(value) for value in safe_evidence] if isinstance(safe_evidence, list) else [],
+            status="quarantined" if conflicts and status == "active" else status,
+            supersedes=supersedes,
+            namespace=(namespace or self.namespace).strip() or "default",
+            expires_at=max(0.0, float(expires_at)),
+            verified=bool(verified),
+            conflicts_with=[memory.id for memory in conflicts],
+        )
         if not item.content:
             return item
         append_jsonl(self.path, asdict(item))
@@ -71,7 +107,7 @@ class MemoryStore:
         status = status.strip().lower()
         if status not in VALID_MEMORY_STATUSES:
             raise ValueError(f"invalid memory status: {status}")
-        items = self.all(100000)
+        items = self.all(100000, include_expired=True, namespace=None)
         changed = False
         for item in items:
             if item.id == item_id:
@@ -135,13 +171,18 @@ class MemoryStore:
             lines.append(f"- [{item.kind}/{item.confidence:.1f}/{item.status}] {item.content} ({item.source}, {ts}, id={item.id})")
         return "\n".join(lines)
 
-    def all(self, limit: int = 50) -> list[MemoryItem]:
+    def all(self, limit: int = 50, *, include_expired: bool = False, namespace: str | None = None) -> list[MemoryItem]:
         if not self.path.exists():
             return []
         rows: list[MemoryItem] = []
         for raw in read_jsonl(self.path):
             try:
-                rows.append(MemoryItem(**raw))
+                item = MemoryItem(**raw)
+                if not include_expired and item.expires_at and item.expires_at <= time.time():
+                    continue
+                if namespace is not None and item.namespace != namespace:
+                    continue
+                rows.append(item)
             except Exception:
                 continue
         return rows[-limit:]
@@ -153,17 +194,21 @@ class MemoryStore:
         *,
         min_confidence: float = 0.0,
         statuses: set[str] | tuple[str, ...] | list[str] | None = ACTIVE_MEMORY_STATUSES,
+        namespace: str | None = None,
+        include_expired: bool = False,
     ) -> list[MemoryItem]:
         q = query.lower().strip()
         allowed_statuses = {str(status).strip().lower() for status in statuses} if statuses is not None else None
         if not q:
-            items = self.all(10000)
+            items = self.all(10000, include_expired=include_expired, namespace=namespace or self.namespace)
             return self._filter_items(items, min_confidence=min_confidence, statuses=allowed_statuses)[-limit:]
         scored: list[tuple[int, MemoryItem]] = []
-        for item in self.all(1000):
+        for item in self.all(1000, include_expired=include_expired, namespace=namespace or self.namespace):
             if allowed_statuses is not None and item.status not in allowed_statuses:
                 continue
             if item.confidence < min_confidence:
+                continue
+            if self.require_verification and not item.verified:
                 continue
             hay = f"{item.kind} {item.content} {item.source} {' '.join(item.evidence or [])}".lower()
             score = sum(1 for token in q.split() if token in hay)
@@ -187,13 +232,51 @@ class MemoryStore:
         inactive = sum(stats.get(f"status:{status}", 0) for status in INACTIVE_MEMORY_STATUSES)
         low_confidence = sum(1 for item in self.all(10000) if item.status == "active" and item.confidence < DEFAULT_CONTEXT_MIN_CONFIDENCE)
         missing_evidence = sum(1 for item in self.all(10000) if item.status == "active" and not item.evidence)
+        unverified = sum(1 for item in self.all(10000) if item.status == "active" and not item.verified)
+        expired = sum(1 for item in self.all(10000, include_expired=True, namespace=None) if item.expires_at and item.expires_at <= time.time())
+        conflicts = sum(1 for item in self.all(10000, include_expired=True, namespace=None) if item.conflicts_with)
         return {
             "total": stats.get("total", 0),
             "active": active,
             "inactive": inactive,
             "low_confidence_active": low_confidence,
             "active_missing_evidence": missing_evidence,
+            "active_unverified": unverified,
+            "expired": expired,
+            "conflicts": conflicts,
         }
+
+    def find_conflicts(self, kind: str, content: str, *, namespace: str | None = None, limit: int = 500) -> list[MemoryItem]:
+        normalized = self._normalize(content)
+        tokens = set(normalized.split())
+        if not tokens:
+            return []
+        negations = {"not", "never", "no", "without", "禁止", "不能", "不要", "非"}
+        polarity = bool(tokens & negations)
+        matches: list[MemoryItem] = []
+        for item in reversed(self.all(limit, namespace=namespace or self.namespace)):
+            if item.kind != kind or item.status != "active":
+                continue
+            other_tokens = set(self._normalize(item.content).split())
+            overlap = len(tokens & other_tokens) / max(1, min(len(tokens), len(other_tokens)))
+            if overlap >= 0.55 and polarity != bool(other_tokens & negations):
+                matches.append(item)
+        return matches[:10]
+
+    def verify(self, item_id: str, *, evidence: str) -> bool:
+        items = self.all(100000, include_expired=True, namespace=None)
+        changed = False
+        for item in items:
+            if item.id != item_id:
+                continue
+            item.verified = True
+            item.status = "active"
+            item.evidence = [*(item.evidence or []), self.redactor.redact_text(evidence)]
+            item.version += 1
+            changed = True
+        if changed:
+            atomic_write_jsonl(self.path, [asdict(item) for item in items])
+        return changed
 
     def _normalize(self, text: str) -> str:
         return " ".join(text.lower().strip().split())

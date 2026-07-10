@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Evolva industrial agent hardening</title></head>
+<body>
+  <h1>Evolva industrial agent hardening</h1>
+  <p>This change turns verified production-readiness gaps into enforceable runtime contracts.</p>
+  <h2>What changed</h2>
+  <ul>
+    <li>Fail-closed production execution, stronger Docker isolation, governed MCP processes, and persisted-data redaction.</li>
+    <li>Correct workflow resume plus retries, conditions, parallel branches, compensation, sessions, cancellation, and scoped approvals.</li>
+    <li>Reliable LLM transport, richer multi-agent orchestration, governed memory, semantic retrieval, and correlated observability.</li>
+    <li>Live eval budgets, full-package typing, release governance, keyring credentials, and state migrations.</li>
+  </ul>
+  <h2>Verification</h2>
+  <p>178 existing tests passed (1 skipped), 18 temporary acceptance tests passed, coverage met 75%, all static/build checks passed, and five eval suites passed at 1.000 with no regression.</p>
+  <h2>Risk and rollback</h2>
+  <p>Existing development workflows remain compatible. Production execution fails closed without isolation. Runtime migration defaults to dry-run, workflow compensation is explicit, and promoted Dream assets can be rolled back by attribution fingerprint.</p>
+</body>
+</html>

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import re
 import time
+import builtins
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from evolva.agent.redaction import Redactor
 
 ACTIVE_SKILL_STATUSES = {"active"}
 INACTIVE_SKILL_STATUSES = {"draft", "deprecated", "disabled", "quarantined"}
@@ -21,8 +23,10 @@ class Skill:
 
 
 class SkillStore:
-    def __init__(self, directory: Path):
+    def __init__(self, directory: Path, *, namespace: str = "default", redactor: Redactor | None = None):
         self.directory = directory
+        self.namespace = namespace.strip() or "default"
+        self.redactor = redactor or Redactor()
         self.directory.mkdir(parents=True, exist_ok=True)
         self._ensure_seed_skills()
 
@@ -38,20 +42,28 @@ class SkillStore:
                 encoding="utf-8",
             )
 
-    def list(self) -> list[Skill]:
-        skills: list[Skill] = []
+    def list(self) -> builtins.list[Skill]:
+        skills: builtins.list[Skill] = []
         for path in sorted(self.directory.glob("*.md")):
             content = path.read_text(encoding="utf-8")
             metadata, body = self._parse_frontmatter(content)
+            expires_at = metadata.get("expires_at")
+            try:
+                if expires_at and float(expires_at) <= time.time():
+                    metadata["status"] = "deprecated"
+            except (TypeError, ValueError):
+                metadata["status"] = "quarantined"
             skills.append(Skill(path.stem, body, path, metadata))
         return skills
 
-    def match(self, query: str, *, limit: int = 5, include_inactive: bool = False) -> list[Skill]:
+    def match(self, query: str, *, limit: int = 5, include_inactive: bool = False) -> builtins.list[Skill]:
         """Return skills selected by manifest triggers and lexical relevance."""
         q = query.lower().strip()
-        scored: list[tuple[int, Skill]] = []
+        scored: builtins.list[tuple[int, Skill]] = []
         for skill in self.list():
             metadata = skill.metadata or {}
+            if skill.name != "general_agent" and str(metadata.get("namespace") or "default") != self.namespace:
+                continue
             if not include_inactive and self._status(metadata) not in ACTIVE_SKILL_STATUSES:
                 continue
             triggers = self._metadata_list(metadata.get("triggers")) + self._metadata_list(metadata.get("keywords"))
@@ -75,7 +87,10 @@ class SkillStore:
     def upsert(self, name: str, content: str, *, metadata: dict[str, Any] | None = None) -> Path:
         safe = re.sub(r"[^a-zA-Z0-9_-]+", "_", name.strip().lower()).strip("_") or f"skill_{int(time.time())}"
         path = self.directory / f"{safe}.md"
-        new_body = content.strip()
+        new_body = self.redactor.redact_text(content.strip())
+        safe_metadata = self.redactor.redact_json(metadata or {})
+        metadata = safe_metadata if isinstance(safe_metadata, dict) else {}
+        metadata.setdefault("namespace", self.namespace)
         if path.exists():
             old = path.read_text(encoding="utf-8")
             old_metadata, old_body = self._parse_frontmatter(old)
@@ -128,6 +143,8 @@ class SkillStore:
         inactive = sum(stats.get(f"status:{status}", 0) for status in INACTIVE_SKILL_STATUSES)
         missing_triggers = 0
         missing_source = 0
+        unverified = 0
+        expired = 0
         for skill in self.list():
             metadata = skill.metadata or {}
             if self._status(metadata) not in ACTIVE_SKILL_STATUSES:
@@ -136,21 +153,30 @@ class SkillStore:
                 missing_triggers += 1
             if skill.name != "general_agent" and not metadata.get("source"):
                 missing_source += 1
+            if skill.name != "general_agent" and str(metadata.get("verified", "false")).lower() not in {"1", "true", "yes"}:
+                unverified += 1
+            try:
+                if metadata.get("expires_at") and float(metadata["expires_at"]) <= time.time():
+                    expired += 1
+            except (TypeError, ValueError):
+                expired += 1
         return {
             "total": stats.get("total", 0),
             "active": active,
             "inactive": inactive,
             "active_missing_triggers": missing_triggers,
             "active_missing_source": missing_source,
+            "active_unverified": unverified,
+            "expired": expired,
         }
 
     def _parse_frontmatter(self, content: str) -> tuple[dict[str, Any], str]:
         if not content.startswith("---\n"):
             legacy_start = content.find("\n---\n")
             if legacy_start > 0:
-                metadata, body = self._parse_frontmatter(content[legacy_start + 1 :])
-                if metadata:
-                    return metadata, body
+                legacy_metadata, legacy_body = self._parse_frontmatter(content[legacy_start + 1 :])
+                if legacy_metadata:
+                    return legacy_metadata, legacy_body
             return {}, content
         end = content.find("\n---", 4)
         if end < 0:
@@ -169,7 +195,7 @@ class SkillStore:
                 metadata[key.strip()] = value
         return metadata, body
 
-    def _metadata_list(self, value: Any) -> list[str]:
+    def _metadata_list(self, value: Any) -> builtins.list[str]:
         if value is None:
             return []
         if isinstance(value, list):

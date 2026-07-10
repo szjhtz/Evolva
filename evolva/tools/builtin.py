@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from dataclasses import asdict
-from typing import Callable
+from typing import Any, Callable, cast
 
 from evolva.agent.capabilities import DEFAULT_TOOL_CAPABILITIES
-from evolva.agent.context import ContextStore
+from evolva.agent.context import ContextKind, ContextStore
 from evolva.agent.memory import MemoryStore
 from evolva.agent.mcp import MCPManager, render_mcp_result
 from evolva.agent.mcp_presets import get_mcp_preset, list_mcp_presets
@@ -205,8 +205,27 @@ def build_registry(
         context.add("artifact", f"yt-dlp info: {url} ok={result.ok}", meta=result.data if isinstance(result.data, dict) else {"url": url})
         return result
 
-    def remember(kind: str, content: str, confidence: float = 0.7, status: str = "active", evidence: list[str] | None = None) -> ToolResult:
-        item = memory.add(kind, content, confidence=confidence, source="agent", status=status, evidence=list(evidence or []))
+    def remember(
+        kind: str,
+        content: str,
+        confidence: float = 0.7,
+        status: str = "active",
+        evidence: list[str] | None = None,
+        namespace: str = "",
+        expires_at: float = 0.0,
+        verified: bool = False,
+    ) -> ToolResult:
+        item = memory.add(
+            kind,
+            content,
+            confidence=confidence,
+            source="agent",
+            status=status,
+            evidence=list(evidence or []),
+            namespace=namespace or None,
+            expires_at=expires_at,
+            verified=verified,
+        )
         return ToolResult(True, f"Remembered [{item.kind}/{item.confidence:.1f}/{item.status}] {item.content}", asdict(item))
 
     def recall(query: str = "") -> ToolResult:
@@ -223,12 +242,29 @@ def build_registry(
         lines = ["Memory audit", *[f"- {key}: {value}" for key, value in sorted(audit.items())]]
         return ToolResult(True, "\n".join(lines), audit)
 
+    def memory_verify(item_id: str, evidence: str) -> ToolResult:
+        changed = memory.verify(item_id, evidence=evidence)
+        if not changed:
+            return ToolResult(False, f"Memory item `{item_id}` was not found")
+        return ToolResult(True, f"Memory item `{item_id}` verified", {"id": item_id, "verified": True, "evidence": evidence})
+
     def list_skills() -> ToolResult:
         names = [f"{s.name} [{(s.metadata or {}).get('status', 'active')}]" for s in skills.list()]
         return ToolResult(True, "\n".join(names), names)
 
-    def save_skill(name: str, content: str, status: str = "active", triggers: list[str] | None = None, source: str = "agent") -> ToolResult:
-        metadata = {"status": status, "source": source}
+    def save_skill(
+        name: str,
+        content: str,
+        status: str = "active",
+        triggers: list[str] | None = None,
+        source: str = "agent",
+        namespace: str = "",
+        expires_at: float = 0.0,
+        verified: bool = False,
+    ) -> ToolResult:
+        metadata = {"status": status, "source": source, "namespace": namespace or skills.namespace, "verified": verified}
+        if expires_at:
+            metadata["expires_at"] = float(expires_at)
         if triggers:
             metadata["triggers"] = list(triggers)
         path = skills.upsert(name, content, metadata=metadata)
@@ -247,7 +283,9 @@ def build_registry(
         return ToolResult(True, "\n".join(lines), audit)
 
     def context_add(kind: str, content: str, role: str = "agent") -> ToolResult:
-        item = context.add(kind, content, role=role)
+        if kind not in {"message", "note", "artifact", "summary", "decision"}:
+            return ToolResult(False, f"Unsupported context kind: {kind}")
+        item = context.add(cast(ContextKind, kind), content, role=role)
         return ToolResult(True, f"Added context [{item.kind}/{item.role}] {item.content[:200]}")
 
     def context_view(query: str = "", limit: int = 12) -> ToolResult:
@@ -310,8 +348,10 @@ def build_registry(
         status = index.status(max_files=int(max_files))
         if not status.get("exists"):
             return ToolResult(True, f"Repo index missing: {status.get('index_file')}", status)
-        stats = status.get("stats") if isinstance(status.get("stats"), dict) else {}
-        skipped = status.get("skipped") if isinstance(status.get("skipped"), dict) else {}
+        stats_value = status.get("stats")
+        skipped_value = status.get("skipped")
+        stats: dict[str, Any] = cast(dict[str, Any], stats_value) if isinstance(stats_value, dict) else {}
+        skipped: dict[str, Any] = cast(dict[str, Any], skipped_value) if isinstance(skipped_value, dict) else {}
         lines = [
             "Repo index status",
             f"- index_file: {status.get('index_file')}",
@@ -347,10 +387,34 @@ def build_registry(
         cwd: str | None = None,
         request_timeout: int = 30,
         max_message_bytes: int = 2_000_000,
+        inherit_env: bool = False,
+        env_allowlist: list[str] | None = None,
+        trust_level: str = "untrusted",
+        allowed_tools: list[str] | None = None,
+        denied_tools: list[str] | None = None,
+        isolation: str = "host",
+        container_image: str = "python:3.12-slim",
+        container_network: str = "none",
     ) -> ToolResult:
         if mcp is None:
             return ToolResult(False, "MCP manager is not configured")
-        config = mcp.add_server(name, command, list(args or []), env=dict(env or {}), cwd=cwd, request_timeout=int(request_timeout), max_message_bytes=int(max_message_bytes))
+        config = mcp.add_server(
+            name,
+            command,
+            list(args or []),
+            env=dict(env or {}),
+            cwd=cwd,
+            request_timeout=int(request_timeout),
+            max_message_bytes=int(max_message_bytes),
+            inherit_env=bool(inherit_env),
+            env_allowlist=list(env_allowlist or []),
+            trust_level=trust_level,
+            allowed_tools=list(allowed_tools or []),
+            denied_tools=list(denied_tools or []),
+            isolation=isolation,
+            container_image=container_image,
+            container_network=container_network,
+        )
         output = f"Added MCP server `{config.name}`: {config.command} {' '.join(config.args)}".strip()
         context.add("artifact", output, meta={"server": config.name, "config_file": str(mcp.config_file)})
         return ToolResult(
@@ -363,6 +427,14 @@ def build_registry(
                 "config_file": str(mcp.config_file),
                 "request_timeout": config.request_timeout,
                 "max_message_bytes": config.max_message_bytes,
+                "inherit_env": config.inherit_env,
+                "env_allowlist": config.env_allowlist,
+                "trust_level": config.trust_level,
+                "allowed_tools": config.allowed_tools,
+                "denied_tools": config.denied_tools,
+                "isolation": config.isolation,
+                "container_image": config.container_image,
+                "container_network": config.container_network,
             },
         )
 
@@ -436,10 +508,13 @@ def build_registry(
         context.add("note", f"Sub-agent {role} result for task `{task}`:\n{output}", role=role)
         return ToolResult(result.ok, output, {"delegate": result.__dict__})
 
-    def collaborate(task: str, roles: list[str] | None = None, context_text: str = "") -> ToolResult:
+    def collaborate(task: str, roles: list[str] | None = None, context_text: str = "", parallel: bool = False, synthesize: bool = False) -> ToolResult:
         if coordinator is None:
             return ToolResult(False, "Multi-agent coordinator is not configured")
-        report = coordinator.collaborate_report(task, roles=roles, context=context_text)
+        if parallel or synthesize:
+            report = coordinator.collaborate_report(task, roles=roles, context=context_text, parallel=bool(parallel), synthesize=bool(synthesize))
+        else:
+            report = coordinator.collaborate_report(task, roles=roles, context=context_text)
         output = report.render()
         context.add("note", f"Multi-agent collaboration for `{task}`:\n{output}")
         return ToolResult(report.status in {"completed", "completed_with_fallbacks"}, output, {"multi_agent": report.to_dict()})
@@ -470,12 +545,13 @@ def build_registry(
     reg.register(Tool("video_extract_frames", "Extract bounded video frames with ffmpeg into a sandbox-writable output directory", {"path": "str", "output_dir": "str", "every_seconds": "float", "max_frames": "int", "timeout": "int"}, video_extract_frames, needs_confirmation=True, capabilities=caps("video_extract_frames")))
     reg.register(Tool("pdf_extract", "Extract PDF text with optional pypdf/PyPDF2 or pdftotext", {"path": "str", "max_chars": "int", "timeout": "int"}, pdf_extract, needs_confirmation=True, capabilities=caps("pdf_extract")))
     reg.register(Tool("yt_dlp_info", "Fetch media metadata/transcript availability through yt-dlp", {"url": "str", "max_chars": "int", "timeout": "int"}, yt_dlp_info, needs_confirmation=True, capabilities=caps("yt_dlp_info")))
-    reg.register(Tool("remember", "Store a governed long-term memory item", {"kind": "str", "content": "str", "confidence": "float", "status": "str", "evidence": "list[str]"}, remember, capabilities=caps("remember")))
+    reg.register(Tool("remember", "Store a namespaced, expiring, governed long-term memory item", {"kind": "str", "content": "str", "confidence": "float", "status": "str", "evidence": "list[str]", "namespace": "str", "expires_at": "float", "verified": "bool"}, remember, capabilities=caps("remember")))
     reg.register(Tool("recall", "Search long-term memory", {"query": "str"}, recall, capabilities=caps("recall")))
     reg.register(Tool("memory_status", "Update a memory item's governance status", {"item_id": "str", "status": "str", "reason": "str"}, memory_status, capabilities=caps("memory_status")))
+    reg.register(Tool("memory_verify", "Promote a memory after attaching verification evidence", {"item_id": "str", "evidence": "str"}, memory_verify, capabilities=caps("memory_verify")))
     reg.register(Tool("memory_audit", "Summarize memory governance quality", {}, memory_audit, capabilities=caps("memory_audit")))
     reg.register(Tool("list_skills", "List available skills", {}, list_skills, capabilities=caps("list_skills")))
-    reg.register(Tool("save_skill", "Create or update a governed markdown skill", {"name": "str", "content": "str", "status": "str", "triggers": "list[str]", "source": "str"}, save_skill, capabilities=caps("save_skill")))
+    reg.register(Tool("save_skill", "Create or update a namespaced, expiring governed markdown skill", {"name": "str", "content": "str", "status": "str", "triggers": "list[str]", "source": "str", "namespace": "str", "expires_at": "float", "verified": "bool"}, save_skill, capabilities=caps("save_skill")))
     reg.register(Tool("skill_status", "Update a skill's governance status", {"name": "str", "status": "str", "reason": "str"}, skill_status, capabilities=caps("skill_status")))
     reg.register(Tool("skill_audit", "Summarize skill governance quality", {}, skill_audit, capabilities=caps("skill_audit")))
     reg.register(Tool("context_add", "Add a note, artifact, summary, decision, or message to persistent context", {"kind": "str", "content": "str", "role": "str"}, context_add, capabilities=caps("context_add")))
@@ -493,13 +569,38 @@ def build_registry(
     reg.register(Tool("repo_index_status", "Show repository index freshness, manifest, and skipped-file diagnostics", {"max_files": "int"}, repo_index_status, capabilities=caps("repo_index_status")))
     reg.register(Tool("mcp_servers", "List configured MCP servers", {}, mcp_servers, capabilities=caps("mcp_servers")))
     reg.register(Tool("mcp_presets", "List built-in browser/search/fetch MCP presets", {}, mcp_presets, capabilities=caps("mcp_presets")))
-    reg.register(Tool("mcp_add_preset", "Persist a built-in browser/search/fetch MCP preset", {"preset": "str", "name": "str", "env": "dict"}, mcp_add_preset, capabilities=caps("mcp_add_preset")))
-    reg.register(Tool("mcp_add_server", "Persist a stdio MCP server config", {"name": "str", "command": "str", "args": "list[str]", "env": "dict", "cwd": "str", "request_timeout": "int", "max_message_bytes": "int"}, mcp_add_server, capabilities=caps("mcp_add_server")))
-    reg.register(Tool("mcp_remove_server", "Remove a configured MCP server", {"name": "str"}, mcp_remove_server, capabilities=caps("mcp_remove_server")))
+    reg.register(Tool("mcp_add_preset", "Persist a built-in browser/search/fetch MCP preset", {"preset": "str", "name": "str", "env": "dict"}, mcp_add_preset, needs_confirmation=True, capabilities=caps("mcp_add_preset")))
+    reg.register(
+        Tool(
+            "mcp_add_server",
+            "Persist a governed stdio MCP server config",
+            {
+                "name": "str",
+                "command": "str",
+                "args": "list[str]",
+                "env": "dict",
+                "cwd": "str",
+                "request_timeout": "int",
+                "max_message_bytes": "int",
+                "inherit_env": "bool",
+                "env_allowlist": "list[str]",
+                "trust_level": "str",
+                "allowed_tools": "list[str]",
+                "denied_tools": "list[str]",
+                "isolation": "str",
+                "container_image": "str",
+                "container_network": "str",
+            },
+            mcp_add_server,
+            needs_confirmation=True,
+            capabilities=caps("mcp_add_server"),
+        )
+    )
+    reg.register(Tool("mcp_remove_server", "Remove a configured MCP server", {"name": "str"}, mcp_remove_server, needs_confirmation=True, capabilities=caps("mcp_remove_server")))
     reg.register(Tool("mcp_health", "Check MCP server health, latency, tool count, and schema cache status", {"server": "str", "refresh": "bool"}, mcp_health, capabilities=caps("mcp_health")))
     reg.register(Tool("mcp_tools", "List tools from configured MCP servers", {"server": "str"}, mcp_tools, capabilities=caps("mcp_tools")))
     reg.register(Tool("mcp_call", "Call an MCP tool via stdio JSON-RPC", {"server": "str", "tool": "str", "arguments": "dict"}, mcp_call, needs_confirmation=True, capabilities=caps("mcp_call")))
     reg.register(Tool("delegate_agent", "Delegate a task to a role agent: planner, researcher, coder, reviewer", {"role": "str", "task": "str", "context_text": "str"}, delegate_agent, capabilities=caps("delegate_agent")))
-    reg.register(Tool("collaborate", "Run a task through multiple role agents", {"task": "str", "roles": "list[str]", "context_text": "str"}, collaborate, capabilities=caps("collaborate")))
+    reg.register(Tool("collaborate", "Run a planned task through multiple role agents with optional parallel execution and synthesis", {"task": "str", "roles": "list[str]", "context_text": "str", "parallel": "bool", "synthesize": "bool"}, collaborate, capabilities=caps("collaborate")))
     reg.register(Tool("dream_report", "Run or verify the local Dream self-evolution loop over trace/eval/evolution evidence", {"limit": "int", "apply": "bool", "verify": "bool"}, dream_report, capabilities=caps("dream_report")))
     return reg

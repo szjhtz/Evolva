@@ -71,6 +71,10 @@ Even without `OPENAI_API_KEY`, Evolva can run local tools, memory, skills, todo,
 
 Runtime state is isolated from the Python package by default. Provider config, memory, context, todo, traces, metrics, artifacts, eval results, MCP server config, and repo index files live under `.evolva/`; set `EVOLVA_RUNTIME_HOME` to place them elsewhere.
 
+For production credentials, install `evolva[credentials]` and set `EVOLVA_CREDENTIAL_BACKEND=keyring`. The API key is then stored by the operating-system credential service instead of plaintext runtime JSON.
+
+> The `local` sandbox is a development backend and does not isolate host reads or processes. Production deployments should use `EVOLVA_PROFILE=prod` with `EVOLVA_SANDBOX_BACKEND=docker`; command execution fails closed when isolation is unavailable. See [Production Operations](docs/production-operations.md).
+
 ## Positioning
 
 Evolva is a composable, observable, and continuously improving Agent Harness. It decomposes engineering-agent behavior into modules that can be inspected, extended, and validated locally:
@@ -88,7 +92,7 @@ Evolva is a composable, observable, and continuously improving Agent Harness. It
 | **TUI Workbench** | One place for chat, tools, traces, model switching, and MCP onboarding | `evolva` |
 | **Repo Index** | Let the agent search files, symbols, and code chunks by repository meaning | `/repo` |
 | **Tools** | Call local tools under policy, sandbox, and trace controls | `/tools` / `/run` |
-| **Workflow / Loop** | Save repeatable engineering tasks with gates, evidence, and resume | `/workflow` / `/loop` |
+| **Workflow / Loop** | Run resumable DAGs with retries, conditions, bounded fan-out, and compensation | `/workflow` / `/loop` |
 | **Trace / Replay** | Keep the proof trail for inputs, tools, decisions, failures, and outputs | `/trace` |
 | **Eval Harness** | Turn agent behavior into regression tests | `evolva eval` |
 | **Memory / Skills** | Promote only governed experience into future context | `/memory` / `/skills` |
@@ -98,7 +102,7 @@ Evolva is a composable, observable, and continuously improving Agent Harness. It
 ## Architecture
 
 <p align="center">
-  <img src="assets/architecture.svg" alt="Evolva architecture" width="100%" />
+  <img src="assets/architecture.png" alt="Evolva architecture" width="100%" />
 </p>
 
 Evolva is organized into three lanes:
@@ -171,6 +175,8 @@ Common TUI flows:
 /mcp health [server]                  Check MCP health and schema cache
 /run mcp_call {"server":"...","tool":"...","arguments":{}}
 /trace list                           List recent runs
+/session list                         List, restore, or fork persisted sessions
+/cancel                               Request cancellation of the active turn (Ctrl+K)
 /trace context latest                 Inspect latest context/prompt events
 /workflow <json>                      Run a workflow spec
 /evolve audit                         Inspect self-evolution coverage
@@ -285,7 +291,7 @@ TUI supports common workstation shortcuts:
 ## Workflow / MCP / Memory
 
 <p align="center">
-  <img src="assets/workflow-mcp-memory.svg" alt="Evolva workflow MCP memory" width="100%" />
+  <img src="assets/workflow-mcp-memory.png" alt="Evolva workflow MCP memory" width="100%" />
 </p>
 
 ## Safety Model
@@ -334,9 +340,9 @@ evolva/
   workflow/engine.py         workflow DAG engine
 assets/
   evolva-poster.jpeg        README hero poster
-  architecture.svg
+  architecture.png
   tui-mockup.svg
-  workflow-mcp-memory.svg
+  workflow-mcp-memory.png
 ```
 
 ## Star History

@@ -17,6 +17,8 @@ from typing import Any
 from evolva.agent.dream import DreamEngine
 from evolva.agent.evolution_analyzer import EvalEvolutionAnalyzer, TraceEvolutionAnalyzer, apply_proposals, render_analysis, render_reports
 from evolva.agent.core import EvolvaAgent, TurnResult
+from evolva.agent.llm import CancellationToken
+from evolva.agent.redaction import redacted_json_dumps
 from evolva.config import AgentConfig, mask_secret, remove_runtime_config_keys, save_runtime_config
 from evolva.loops import LoopDraftSession, LoopRunner, render_confirmed_draft, render_loop_draft, render_loop_result, render_loop_specs, render_loop_validation, validate_loop_spec
 from evolva.loops.planner import is_natural_language_loop
@@ -55,7 +57,7 @@ TUI keys:
   /exit          Quit
 
 Commands:
-  /help, /config [set|wizard|clear], /tools, /skills, /memory [query|stats|recent n], /context [query], /todo, /agents, /trace [list|show|context], /model [name], /policy, /mcp [add|remove|tools|health], /image <path|url> [text], /evolve [feedback|status|audit|trace|apply-trace|eval|apply-eval], /dream [status|backlog|verify|verify --promote|apply|--min-confidence n], /loop [list|show|run], /run <tool> <json>
+  /help, /config [set|wizard|clear], /session [list|new|use|rename|fork|retry], /tools, /skills, /memory [query|stats|recent n], /context [query], /todo, /agents, /trace [list|show|context], /model [name], /policy, /mcp [add|remove|tools|health], /image <path|url> [text], /evolve [feedback|status|audit|trace|apply-trace|eval|apply-eval], /dream [status|backlog|verify|verify --promote|apply|--min-confidence n], /loop [list|show|run], /run <tool> <json>
 """.strip()
 
 
@@ -75,8 +77,14 @@ class TUIConfirmation:
     def ask(self, tool_name: str, args: dict[str, Any]) -> bool:
         if self.app.assume_yes:
             return True
-        prompt = f"Allow tool `{tool_name}` with args {json.dumps(args, ensure_ascii=False)}? y/N"
+        prompt = f"Allow tool `{tool_name}` with args {redacted_json_dumps(args, ensure_ascii=False)}? y/N"
         return self.app.request_confirmation(prompt)
+
+    def ask_request(self, request: dict[str, Any]) -> str:
+        if self.app.assume_yes:
+            return "automatic"
+        prompt = str(request.get("summary") or f"Allow tool `{request.get('tool', '')}`?")
+        return self.app.request_approval(prompt + "  [y] once / [a] session / [N] deny")
 
 
 class EvolvaTUI:
@@ -96,9 +104,10 @@ class EvolvaTUI:
         self.queue: Queue[tuple[str, Any]] = Queue()
         self.confirmation_prompt: str | None = None
         self.confirmation_event: threading.Event | None = None
-        self.confirmation_answer: bool | None = None
+        self.confirmation_answer: bool | str | None = None
         self.stdscr: Any = None
         self._cached_version: str | None = None
+        self.current_cancellation: CancellationToken | None = None
 
     def run(self) -> int:
         try:
@@ -171,13 +180,16 @@ class EvolvaTUI:
             return curses.A_NORMAL | extra
 
     def request_confirmation(self, prompt: str) -> bool:
+        return self.request_approval(prompt) in {"once", "session"}
+
+    def request_approval(self, prompt: str) -> str:
         event = threading.Event()
         self.confirmation_prompt = prompt
         self.confirmation_event = event
         self.confirmation_answer = None
         self.status = prompt
         event.wait()
-        answer = bool(self.confirmation_answer)
+        answer = str(self.confirmation_answer or "deny")
         self.confirmation_prompt = None
         self.confirmation_event = None
         self.confirmation_answer = None
@@ -187,16 +199,22 @@ class EvolvaTUI:
         text = self._key_text(ch)
         if self.confirmation_event is not None:
             if text in ("y", "Y"):
-                self.confirmation_answer = True
+                self.confirmation_answer = "once"
                 self.status = "Tool approved."
                 self.confirmation_event.set()
+            elif text in ("a", "A"):
+                self.confirmation_answer = "session"
+                self.status = "Tool approved for this session."
+                self.confirmation_event.set()
             elif text in ("n", "N", "\x1b", "\n", "\r") or self._is_key(ch, curses.KEY_ENTER):
-                self.confirmation_answer = False
+                self.confirmation_answer = "deny"
                 self.status = "Tool denied."
                 self.confirmation_event.set()
             return None
         if self.busy:
-            if self._is_key(ch, curses.KEY_PPAGE):
+            if text == "\x0b":  # Ctrl+K
+                self.cancel_active()
+            elif self._is_key(ch, curses.KEY_PPAGE):
                 self.scroll += 3
             elif self._is_key(ch, curses.KEY_NPAGE):
                 self.scroll = max(0, self.scroll - 3)
@@ -293,7 +311,7 @@ class EvolvaTUI:
         return isinstance(ch, int) and ch in keys
 
     def _complete_command(self) -> None:
-        commands = ["/help", "/config", "/tools", "/skills", "/memory", "/context", "/todo", "/agents", "/trace", "/model", "/policy", "/repo", "/mcp", "/image", "/evolve", "/dream", "/loop", "/run", "/exit"]
+        commands = ["/help", "/config", "/session", "/cancel", "/tools", "/skills", "/memory", "/context", "/todo", "/agents", "/trace", "/model", "/policy", "/repo", "/mcp", "/image", "/evolve", "/dream", "/loop", "/run", "/exit"]
         matches = [c for c in commands if c.startswith(self.input_text)]
         if len(matches) == 1:
             self.input_text = matches[0] + (" " if matches[0] not in {"/help", "/tools", "/skills", "/exit"} else "")
@@ -309,12 +327,24 @@ class EvolvaTUI:
             return
         self.busy = True
         self.status = "Agent thinking..."
-        thread = threading.Thread(target=self._worker_chat, args=(line,), daemon=True)
-        thread.start()
+        self._launch_chat(line)
 
-    def _worker_chat(self, line: str) -> None:
+    def _launch_chat(self, line: str) -> None:
+        token = CancellationToken()
+        self.current_cancellation = token
+        threading.Thread(target=self._worker_chat, args=(line, token), daemon=True).start()
+
+    def cancel_active(self) -> bool:
+        if not self.busy or self.current_cancellation is None:
+            self._add_system("No cancellable run is active.")
+            return False
+        self.current_cancellation.cancel()
+        self.status = "Cancelling current run..."
+        return True
+
+    def _worker_chat(self, line: str, cancellation_token: CancellationToken | None = None) -> None:
         try:
-            result = self.agent.chat(line)
+            result = self.agent.chat(line, cancellation_token=cancellation_token)
             self.queue.put(("agent_result", result))
         except Exception as exc:
             self.queue.put(("error", f"Agent error: {exc}"))
@@ -332,6 +362,10 @@ class EvolvaTUI:
                 self._add_system(TUI_HELP)
             elif line.startswith("/config"):
                 self._handle_config_command(line.removeprefix("/config").strip())
+            elif line == "/cancel":
+                self.cancel_active()
+            elif line.startswith("/session"):
+                self._handle_session_command(line.removeprefix("/session").strip())
             elif line == "/tools":
                 self._add_system(self.agent.tools.describe())
             elif line == "/skills":
@@ -592,6 +626,43 @@ class EvolvaTUI:
         self.status = f"Model switched to {switched}"
         self._add_system(f"Switched model: {switched}")
 
+    def _handle_session_command(self, value: str) -> None:
+        if value in {"", "list"}:
+            current = self.agent.active_session.id
+            rows = self.agent.sessions.list()
+            body = "\n".join(
+                f"{'*' if session.id == current else '-'} {session.id}  {session.name}  messages={len(session.messages)}"
+                for session in rows
+            )
+            self._add_system(body or "No sessions.")
+            return
+        if value.startswith("new"):
+            session = self.agent.new_session(value.removeprefix("new").strip() or "New session")
+            self._add_system(f"Created session {session.id}: {session.name}")
+            return
+        if value.startswith("use "):
+            session = self.agent.switch_session(value.removeprefix("use ").strip())
+            self._add_system(f"Switched to session {session.id}: {session.name}")
+            return
+        if value.startswith("rename "):
+            session = self.agent.rename_session(value.removeprefix("rename ").strip())
+            self._add_system(f"Renamed session {session.id}: {session.name}")
+            return
+        if value.startswith("fork"):
+            session = self.agent.fork_session(value.removeprefix("fork").strip())
+            self._add_system(f"Forked session {session.id}: {session.name}")
+            return
+        if value == "retry":
+            prompt = self.agent.retry_session_prompt()
+            if not prompt:
+                self._add_system("Current session has no user turn to retry.")
+                return
+            self.busy = True
+            self.status = "Retrying last session turn..."
+            self._launch_chat(prompt)
+            return
+        self._add_system("Usage: /session list | /session new [name] | /session use <id> | /session rename <name> | /session fork [name] | /session retry")
+
     def _handle_config_command(self, value: str) -> None:
         if not value:
             self._add_system(
@@ -652,7 +723,14 @@ class EvolvaTUI:
         if key == "temperature":
             value = float(value)
         save_runtime_config({key: value}, self.agent.config.runtime_config_file)
-        self.agent.update_llm_config(**{key: value})
+        if key == "api_key":
+            self.agent.update_llm_config(api_key=str(value))
+        elif key == "model":
+            self.agent.update_llm_config(model=str(value))
+        elif key == "base_url":
+            self.agent.update_llm_config(base_url=str(value))
+        else:
+            self.agent.update_llm_config(temperature=float(value))
         shown = mask_secret(str(value)) if key == "api_key" else value
         self.status = f"Saved {key}."
         self._add_system(f"Saved {key}: {shown}\nEffective model: {self.agent.config.model}\nProvider: {self.agent.config.base_url}\nAPI key: {mask_secret(self.agent.config.api_key)}")
@@ -816,6 +894,7 @@ class EvolvaTUI:
                     self.tool_logs.extend(result.tool_logs)
                 self._add_agent(result.answer)
                 self.busy = False
+                self.current_cancellation = None
                 self.status = "Ready"
             elif kind == "tool_result":
                 name, ok, output = payload
@@ -823,20 +902,24 @@ class EvolvaTUI:
                 self.tool_logs.append(prefix + "\n" + output)
                 self._add_system(prefix + "\n" + output)
                 self.busy = False
+                self.current_cancellation = None
                 self.status = "Ready"
             elif kind == "loop_result":
                 rendered = render_loop_result(payload)
                 self.tool_logs.append(rendered)
                 self._add_system(rendered)
                 self.busy = False
+                self.current_cancellation = None
                 self.status = "Ready"
             elif kind == "system":
                 self._add_system(str(payload))
                 self.busy = False
+                self.current_cancellation = None
                 self.status = "Ready"
             elif kind == "error":
                 self._add_error(str(payload))
                 self.busy = False
+                self.current_cancellation = None
                 self.status = "Error"
 
     def _add_user(self, text: str) -> None:
@@ -1024,8 +1107,18 @@ class EvolvaTUI:
         return "…" + path[-max(1, width - 1):]
 
     def _token_estimate(self) -> int:
+        usage = getattr(self.agent, "last_llm_usage", {})
+        if isinstance(usage, dict):
+            exact = usage.get("total_tokens")
+            if not isinstance(exact, (int, float)):
+                input_tokens = usage.get("input_tokens", usage.get("prompt_tokens", 0))
+                output_tokens = usage.get("output_tokens", usage.get("completion_tokens", 0))
+                if isinstance(input_tokens, (int, float)) and isinstance(output_tokens, (int, float)):
+                    exact = input_tokens + output_tokens
+            if isinstance(exact, (int, float)) and exact > 0:
+                return int(exact)
         text = "\n".join(msg.text for msg in self.messages) + "\n" + self.input_text
-        # Fast local approximation for the footer; exact provider tokenization is intentionally optional.
+        # Fast local approximation until the provider returns exact usage.
         return max(0, len(text) // 4)
 
 
@@ -1221,6 +1314,7 @@ if TEXTUAL_AVAILABLE:
             Binding("ctrl+r", "traces", "Traces"),
             Binding("ctrl+x", "context", "Context"),
             Binding("ctrl+t", "toggle_tools", "Tools"),
+            Binding("ctrl+k", "cancel", "Cancel run"),
         ]
 
         THINKING_FRAMES = ("✢", "✣", "✤", "✥", "✦", "✧", "✶", "✷", "✸", "✹", "✺", "✽")
@@ -1315,9 +1409,32 @@ if TEXTUAL_AVAILABLE:
             if line in {"/exit", "/quit"}:
                 self.exit()
                 return
-            self._write_chat(f"[bold white]You ›[/] {line}")
+            input_widget = self.query_one("#input", EvolvaInput)
+            if self.runtime.config_wizard is not None:
+                wizard = self.runtime.config_wizard
+                fields = wizard.get("fields", [])
+                index = int(wizard.get("index", 0))
+                field = fields[index] if index < len(fields) else ""
+                shown = "<hidden>" if field == "api_key" and line else line
+                self._write_chat(f"[bold white]You ›[/] {shown}")
+                self.runtime._handle_config_wizard_input(line)
+                input_widget.set_value(self.runtime.input_text)
+                self._flush_runtime_messages()
+                self._refresh_status()
+                return
+            if self.runtime.busy:
+                if line == "/cancel":
+                    self.runtime.cancel_active()
+                    self._refresh_status()
+                    return
+                self._write_chat("[yellow]A run is already active. Wait for it to finish before submitting another command.[/]")
+                return
+            self._write_chat(f"[bold white]You ›[/] {self.runtime._sanitize_display_line(line)}")
             if line == "/config wizard":
-                self._write_chat("[yellow]Use /config set model|base_url|api_key|temperature <value> in Textual mode.[/]")
+                self.runtime._handle_config_command("wizard")
+                input_widget.set_value(self.runtime.input_text)
+                self._flush_runtime_messages()
+                self._refresh_status()
                 return
             if line.startswith("/"):
                 self.runtime._handle_command(line)
@@ -1328,15 +1445,14 @@ if TEXTUAL_AVAILABLE:
             self.runtime.busy = True
             self.runtime.status = "thinking"
             self._refresh_status()
-            thread = threading.Thread(target=self.runtime._worker_chat, args=(line,), daemon=True)
-            thread.start()
+            self.runtime._launch_chat(line)
 
         def action_model(self) -> None:
             self.query_one("#input", EvolvaInput).set_value("/model ")
             self.query_one("#input", EvolvaInput).focus()
 
         def action_config(self) -> None:
-            self.query_one("#input", EvolvaInput).set_value("/config ")
+            self.query_one("#input", EvolvaInput).set_value("/config wizard")
             self.query_one("#input", EvolvaInput).focus()
 
         def action_traces(self) -> None:
@@ -1352,6 +1468,11 @@ if TEXTUAL_AVAILABLE:
             self.runtime.show_tools = self.show_tools
             panel = self.query_one("#tool_panel")
             panel.set_class(not self.show_tools, "hidden")
+            self._refresh_status()
+
+        def action_cancel(self) -> None:
+            self.runtime.cancel_active()
+            self._flush_runtime_messages()
             self._refresh_status()
 
         def _brand_text(self) -> str:
@@ -1427,9 +1548,9 @@ if TEXTUAL_AVAILABLE:
 
 else:
 
-    EvolvaInput = None  # type: ignore[assignment]
+    EvolvaInput = None  # type: ignore[misc,assignment]
 
-    class EvolvaTextualApp:  # pragma: no cover - fallback placeholder.
+    class EvolvaTextualApp:  # type: ignore[no-redef]  # pragma: no cover - fallback placeholder.
         """Placeholder used when Textual is not installed."""
 
         def __init__(self, *_args: Any, **_kwargs: Any):

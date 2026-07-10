@@ -73,7 +73,7 @@ pipx install git+https://github.com/koppx/Evolva.git
 evolva
 ```
 
-首次进入 TUI 后，直接在工作台里配置模型，不需要手动 export 环境变量。API key 会写入本地 git-ignored runtime config，并在界面中脱敏展示：
+首次进入 TUI 后，直接在工作台里配置模型，不需要手动 export 环境变量。默认配置写入本地 git-ignored runtime config；生产环境建议安装 `evolva[credentials]` 并设置 `EVOLVA_CREDENTIAL_BACKEND=keyring`，把 API key 交给系统凭据库保存：
 
 ```text
 /config wizard                         # 交互式配置 model / base_url / api_key / temperature
@@ -81,11 +81,13 @@ F4                                     # 快速唤起配置入口
 /config                                # 查看当前 provider 配置，AK 只显示脱敏状态
 /config set model <model>              # 单独切换模型
 /config set base_url https://...       # 配置 OpenAI-compatible endpoint
-/config set api_key <api-key>          # 保存到本地 git-ignored runtime config，界面中会脱敏
+/config set api_key <api-key>          # 保存凭据，界面与持久化记录均会脱敏
 /model                                 # 查看当前模型与 provider
 ```
 
 配置默认保存到本地 `.evolva/runtime/config.json`，`.evolva/` 会被 `.gitignore` 忽略；也可以用 `EVOLVA_RUNTIME_HOME` 指向独立的运行态目录。如果不配置模型，Evolva 仍可先以本地规则模式使用工具、记忆、Trace、Workflow、Eval 等能力。
+
+> `local` sandbox 只适合开发，它不能隔离宿主机读取和进程。生产运行请使用 `EVOLVA_PROFILE=prod` 与 `EVOLVA_SANDBOX_BACKEND=docker`；未启用隔离时，生产策略会拒绝 Shell/Python 执行。完整检查项见 [生产运行指南](docs/production-operations.md)。
 
 日常使用围绕 Slash Commands：
 
@@ -98,6 +100,8 @@ F4                                     # 快速唤起配置入口
 /mcp add filesystem npx -y @modelcontextprotocol/server-filesystem .
 /mcp tools filesystem                   # 查看 MCP tools
 /trace list                             # 查看最近运行
+/session list                           # 查看、恢复和分支历史会话
+/cancel                                 # 请求停止当前任务（也可按 Ctrl+K）
 /loop list                              # 查看可复用 Agent Loops
 /loop 做一个响应式 landing page，有 hero、pricing、FAQ
                                        # 一句话生成 Loop 草案，不会直接执行
@@ -120,7 +124,7 @@ Evolva 的功能按真实使用路径组织：先让 Agent 看懂仓库，再安
 | **Repo Index** | 让 Agent 能按仓库语义搜索文件、符号和代码片段 | `/repo` |
 | **Tools** | 受控调用文件、Python、Shell、Web、Todo、Memory、MCP 和子 agent | `/tools` / `/run` |
 | **Loop Engineering** | 把重复工程任务保存成可确认、可运行、可恢复的流程 | `/loop` |
-| **Workflow** | 用 JSON 描述更底层的 DAG 执行流程 | `/workflow` |
+| **Workflow** | 可恢复的 DAG：重试、条件、并行分支与失败补偿 | `/workflow` |
 | **Trace / Replay** | 留下每次执行的证据：输入、工具、策略、错误、输出 | `/trace` |
 | **Eval Harness** | 把 Agent 行为变成可回归的 JSONL 测试资产 | `evolva eval` |
 | **Memory / Skills** | 只让经过治理的经验进入上下文，避免记忆污染 | `/memory` / `/skills` |
@@ -136,7 +140,7 @@ Evolva 的功能按真实使用路径组织：先让 Agent 看懂仓库，再安
 架构上只有三件事：
 
 1. **运行入口**：TUI 负责对话、Slash Command、模型配置和 Trace 查看；Core Runtime 负责编排 plan / act / observe。
-2. **执行边界**：所有文件、Shell、Python、MCP、Workflow 调用都先经过 Policy 和 Sandbox，风险决策会被记录。
+2. **执行边界**：文件、Shell、Python、MCP、Workflow 调用先经过 Policy 和审批；生产命令执行必须使用隔离 Sandbox，风险决策会被记录。
 3. **证据回流**：Trace 记录过程，Eval 做回归，Evolution 把稳定经验写回 Memory / Skills，让下一次执行更有上下文。
 
 ## Loop Engineering

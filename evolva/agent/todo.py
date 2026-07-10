@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import builtins
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
@@ -37,7 +38,7 @@ class TodoStore:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
-    def list(self, *, include_done: bool = True) -> list[TodoItem]:
+    def list(self, *, include_done: bool = True) -> builtins.list[TodoItem]:
         items = self._load()
         if not include_done:
             items = [x for x in items if x.status not in {"done", "cancelled"}]
@@ -49,7 +50,7 @@ class TodoStore:
             raise ValueError("todo title is required")
         created: TodoItem | None = None
 
-        def update(raw: object) -> list[dict]:
+        def update(raw: object) -> builtins.list[dict]:
             nonlocal created
             items = self._items_from_raw(raw)
             next_id = max((item.id for item in items), default=0) + 1
@@ -64,7 +65,7 @@ class TodoStore:
     def update(self, todo_id: int, *, status: str | None = None, title: str | None = None, detail: str | None = None, owner: str | None = None) -> TodoItem:
         updated: TodoItem | None = None
 
-        def apply_update(raw: object) -> list[dict]:
+        def apply_update(raw: object) -> builtins.list[dict]:
             nonlocal updated
             items = self._items_from_raw(raw)
             for item in items:
@@ -94,7 +95,7 @@ class TodoStore:
     def clear(self, *, include_done: bool = False) -> int:
         removed = 0
 
-        def apply_clear(raw: object) -> list[dict]:
+        def apply_clear(raw: object) -> builtins.list[dict]:
             nonlocal removed
             items = self._items_from_raw(raw)
             if include_done:
@@ -123,19 +124,19 @@ class TodoStore:
         detail = f" — {item.detail}" if item.detail else ""
         return f"#{item.id} [{item.status}] ({item.owner}) {item.title}{detail}"
 
-    def _load(self) -> list[TodoItem]:
+    def _load(self) -> builtins.list[TodoItem]:
         if not self.path.exists():
             return []
         raw = read_json(self.path, [])
         return self._items_from_raw(raw)
 
-    def _save(self, items: list[TodoItem]) -> None:
+    def _save(self, items: builtins.list[TodoItem]) -> None:
         atomic_write_json(self.path, [asdict(x) for x in items])
 
-    def _items_from_raw(self, raw: object) -> list[TodoItem]:
+    def _items_from_raw(self, raw: object) -> builtins.list[TodoItem]:
         if not isinstance(raw, list):
             return []
-        items: list[TodoItem] = []
+        items: builtins.list[TodoItem] = []
         for row in raw:
             if isinstance(row, dict):
                 items.append(TodoItem(**row))

@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
 from evolva.agent.llm import OpenAICompatibleLLM, extract_json_object
 from evolva.agent.memory import MemoryStore
@@ -65,6 +66,8 @@ class MultiAgentRun:
     results: list[AgentRoleResult] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     route: dict[str, object] | None = None
+    plan: list[dict[str, object]] = field(default_factory=list)
+    synthesis: str = ""
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -80,6 +83,8 @@ class MultiAgentRun:
         if self.errors:
             lines.append("\nErrors:")
             lines.extend(f"- {item}" for item in self.errors)
+        if self.synthesis:
+            lines.append(f"\n## Synthesis\n{self.synthesis}")
         return "\n".join(lines)
 
 
@@ -259,10 +264,18 @@ class MultiAgentCoordinator:
             fallback = self._fallback(role_obj, task, context)
             return AgentRoleResult(role_obj.name, False, fallback, "failed_fallback", int((time.monotonic() - started) * 1000), error=str(exc), fallback=True)
 
-    def collaborate(self, task: str, *, roles: list[str] | None = None, context: str = "") -> str:
-        return json.dumps(self.collaborate_report(task, roles=roles, context=context).outputs(), ensure_ascii=False, indent=2)
+    def collaborate(self, task: str, *, roles: list[str] | None = None, context: str = "", parallel: bool = False, synthesize: bool = False) -> str:
+        return json.dumps(self.collaborate_report(task, roles=roles, context=context, parallel=parallel, synthesize=synthesize).outputs(), ensure_ascii=False, indent=2)
 
-    def collaborate_report(self, task: str, *, roles: list[str] | None = None, context: str = "") -> MultiAgentRun:
+    def collaborate_report(
+        self,
+        task: str,
+        *,
+        roles: list[str] | None = None,
+        context: str = "",
+        parallel: bool = False,
+        synthesize: bool = False,
+    ) -> MultiAgentRun:
         task = task.strip()
         if not task:
             raise ValueError("task is required")
@@ -278,15 +291,74 @@ class MultiAgentCoordinator:
         started_at = time.time()
         results: list[AgentRoleResult] = []
         errors: list[str] = []
-        running_context = context
-        for role in chosen:
-            result = self.delegate_report(role, task, context=running_context)
-            results.append(result)
+        plan = self._plan_assignments(task, chosen)
+        if parallel and len(chosen) > 1:
+            ordered: dict[str, AgentRoleResult] = {}
+            with ThreadPoolExecutor(max_workers=min(len(chosen), self.max_roles_per_run), thread_name_prefix="evolva-role") as pool:
+                futures = {
+                    pool.submit(self.delegate_report, role, str(assignment["task"]), context=context): role
+                    for role, assignment in ((role, next(item for item in plan if item["role"] == role)) for role in chosen)
+                }
+                for future in as_completed(futures):
+                    role = futures[future]
+                    try:
+                        ordered[role] = future.result()
+                    except Exception as exc:
+                        ordered[role] = AgentRoleResult(role, False, "", "failed", 0, error=str(exc))
+            results = [ordered[role] for role in chosen]
+        else:
+            running_context = context
+            for role in chosen:
+                assignment = next(item for item in plan if item["role"] == role)
+                result = self.delegate_report(role, str(assignment["task"]), context=running_context)
+                results.append(result)
+                running_context += f"\n\n[{role}]\n{result.output}"
+        for result in results:
             if not result.ok:
-                errors.append(f"{role}: {result.error or result.status}")
-            running_context += f"\n\n[{role}]\n{result.output}"
+                errors.append(f"{result.role}: {result.error or result.status}")
         status = "completed" if not errors else "completed_with_fallbacks"
-        return MultiAgentRun(run_id=run_id, task=task, roles=chosen, status=status, started_at=started_at, ended_at=time.time(), max_roles=self.max_roles_per_run, results=results, errors=errors, route=route)
+        synthesis = self._synthesize(task, results) if synthesize else ""
+        return MultiAgentRun(
+            run_id=run_id,
+            task=task,
+            roles=chosen,
+            status=status,
+            started_at=started_at,
+            ended_at=time.time(),
+            max_roles=self.max_roles_per_run,
+            results=results,
+            errors=errors,
+            route=route,
+            plan=plan,
+            synthesis=synthesis,
+        )
+
+    def _plan_assignments(self, task: str, roles: list[str]) -> list[dict[str, object]]:
+        focus = {
+            "planner": "Define executable steps, dependencies, budgets, and acceptance criteria.",
+            "researcher": "Gather evidence and identify uncertainty relevant to the task.",
+            "coder": "Produce concrete implementation decisions and verification actions.",
+            "reviewer": "Challenge correctness, safety, regressions, and missing tests.",
+        }
+        return [
+            {"role": role, "task": f"{task}\n\nRole assignment: {focus.get(role, self.roles[role].description)}", "depends_on": []}
+            for role in roles
+        ]
+
+    def _synthesize(self, task: str, results: list[AgentRoleResult]) -> str:
+        evidence = "\n\n".join(f"[{result.role}/{result.status}]\n{result.output}" for result in results)
+        if not self.llm.available:
+            return evidence
+        try:
+            return self.llm.chat(
+                [
+                    {"role": "system", "content": "You are Evolva's lead agent. Reconcile role reports into one decision, resolving conflicts and preserving evidence, risks, and next actions."},
+                    {"role": "user", "content": f"Task:\n{task}\n\nRole reports:\n{evidence}"},
+                ],
+                temperature=0.1,
+            ).content.strip()
+        except Exception as exc:
+            return f"Synthesis unavailable: {exc}\n\n{evidence}"
 
     def route_task(self, task: str, *, max_roles: int | None = None) -> TaskRoute:
         return self.router.route(task, max_roles=max_roles or self.max_roles_per_run)
@@ -412,13 +484,15 @@ class MultiAgentCoordinator:
         }
 
     def _chat_json(self, messages: list[dict[str, object]]) -> dict[str, object]:
+        data: dict[str, Any]
         if hasattr(self.llm, "chat_json"):
-            data = self.llm.chat_json(messages, required_keys=["tool", "final"], temperature=0.2)  # type: ignore[attr-defined]
+            data = dict(self.llm.chat_json(messages, required_keys=["tool", "final"], temperature=0.2))  # type: ignore[attr-defined]
         else:
             response = self.llm.chat(messages, temperature=0.2)  # type: ignore[attr-defined]
-            data = extract_json_object(response.content)
-            if data is None:
+            parsed = extract_json_object(response.content)
+            if parsed is None:
                 raise RuntimeError("LLM response did not contain a JSON object")
+            data = parsed
         missing = [key for key in ("tool", "final") if key not in data]
         if missing:
             raise RuntimeError(f"LLM JSON response missing required keys: {', '.join(missing)}")

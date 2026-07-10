@@ -166,6 +166,7 @@ class DockerWorkspaceBackend:
         cpus: str = "1",
         pids_limit: int = 128,
         user: str = "",
+        writable_roots: tuple[Path, ...] = (),
         runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     ):
         self.root = root.resolve()
@@ -176,6 +177,7 @@ class DockerWorkspaceBackend:
         self.cpus = cpus
         self.pids_limit = int(pids_limit)
         self.user = user or _host_user()
+        self.writable_roots = tuple(path.resolve() for path in writable_roots)
         self.runner = runner
 
     def run_command(self, spec: CommandSpec) -> ToolResult:
@@ -236,11 +238,19 @@ class DockerWorkspaceBackend:
             str(self.pids_limit),
             "--user",
             self.user,
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges:true",
             "--workdir",
             str(cwd),
             "--mount",
-            f"type=bind,src={self.root},dst={self.root}",
+            f"type=bind,src={self.root},dst={self.root}" + (",readonly" if self.writable_roots else ""),
         ]
+        for writable_root in self.writable_roots:
+            if not _is_relative_to(writable_root, self.root):
+                continue
+            args.extend(["--mount", f"type=bind,src={writable_root},dst={writable_root}"])
         if self.read_only:
             args.extend(["--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m"])
         args.extend([self.image, *argv])
@@ -318,6 +328,8 @@ class Sandbox:
             f"Sandbox root={self.root}; workspace={self.workspace}; shell={'enabled' if self.policy.allow_shell else 'disabled'}; "
             f"backend={self.backend.name}; writable_roots={writable}; rollback_on_failure={self.policy.rollback_on_failure}; snapshot_roots={snapshots}"
         )
+        if isinstance(self.backend, LocalWorkspaceBackend):
+            details += "; isolation=none; production_ready=false"
         if isinstance(self.backend, DockerWorkspaceBackend):
             details += f"; image={self.backend.image}; network={self.backend.network}; read_only={self.backend.read_only}; memory={self.backend.memory}; cpus={self.backend.cpus}; pids_limit={self.backend.pids_limit}"
         return details
@@ -419,6 +431,7 @@ def build_backend(policy: SandboxPolicy) -> SandboxBackend:
             cpus=policy.container_cpus,
             pids_limit=policy.container_pids_limit,
             user=policy.container_user,
+            writable_roots=policy.writable_roots,
         )
     raise ValueError(f"Unknown sandbox backend: {policy.backend}")
 

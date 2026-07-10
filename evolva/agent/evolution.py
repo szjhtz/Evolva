@@ -115,6 +115,26 @@ class SelfEvolutionEngine:
             trigger = "quality_signal"
         return self.evolve(feedback, task=user_message, outcome=final_answer[:1000], trigger=trigger)
 
+    def rollback_fingerprint(self, fingerprint: str, *, reason: str) -> dict[str, Any]:
+        """Deactivate every durable asset attributed to one evolution run."""
+
+        fingerprint = fingerprint.strip()
+        rolled_back_memories: list[str] = []
+        deprecated_skills: list[str] = []
+        if not fingerprint:
+            return {"fingerprint": "", "memories": [], "skills": []}
+        for item in self.memory.all(100000, include_expired=True, namespace=None):
+            if item.status == "active" and item.source.endswith(f":{fingerprint}"):
+                if self.memory.rollback(item.id, reason=reason):
+                    rolled_back_memories.append(item.id)
+        for skill in self.skills.list():
+            metadata = skill.metadata or {}
+            if str(metadata.get("fingerprint") or "") != fingerprint:
+                continue
+            if self.skills.set_status(skill.name, "deprecated", reason=reason):
+                deprecated_skills.append(skill.name)
+        return {"fingerprint": fingerprint, "memories": rolled_back_memories, "skills": deprecated_skills}
+
     def status(self, *, recent: int = 5) -> dict[str, Any]:
         lessons = [m for m in self.memory.all(1000) if m.kind == "lesson"]
         lesson_sources: dict[str, int] = {}
@@ -161,7 +181,7 @@ class SelfEvolutionEngine:
         automation can reason about the evolution loop without parsing prose.
         """
         status = self.status(recent=8)
-        proposals = []
+        proposals: list[Any] = []
         if trace_analysis is not None:
             proposals.extend(getattr(trace_analysis, "proposals", []) or [])
         if eval_analysis is not None:

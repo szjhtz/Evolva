@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from evolva.agent.redaction import Redactor
 from evolva.storage import atomic_update_json, atomic_write_json, read_json
 
 ContextKind = Literal["message", "note", "artifact", "summary", "decision"]
@@ -29,16 +30,18 @@ class ContextItem:
 class ContextStore:
     """Persistent run context: recent messages, notes, artifacts, and summaries."""
 
-    def __init__(self, path: Path, *, max_items: int = 200):
+    def __init__(self, path: Path, *, max_items: int = 200, redactor: Redactor | None = None):
         self.path = path
         self.max_items = max_items
+        self.redactor = redactor or Redactor()
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def add(self, kind: ContextKind, content: str, *, role: str = "system", meta: dict[str, Any] | None = None) -> ContextItem:
-        content = content.strip()
+        content = self.redactor.redact_text(content.strip())
         if not content:
             raise ValueError("context content is required")
-        item = ContextItem(kind=kind, content=content, role=role, meta=meta or {})
+        safe_meta = self.redactor.redact_json(meta or {})
+        item = ContextItem(kind=kind, content=content, role=role, meta=safe_meta if isinstance(safe_meta, dict) else {})
 
         def update(raw: Any) -> list[dict[str, Any]]:
             items = self._items_from_raw(raw)

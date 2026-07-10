@@ -179,6 +179,7 @@ class LoopRunner:
         for attempt in range(1, max_attempts + 1):
             attempt_started = time.time()
             budget_error = budget.check_before_attempt(phase)
+            artifacts: list[dict[str, Any]]
             if budget_error:
                 ok, output, artifacts = False, f"Loop execution budget exceeded: {budget_error}", []
             else:
@@ -462,7 +463,7 @@ class LoopRunner:
     def _execution_bounds_for_spec(spec: LoopSpec) -> AgentExecutionBounds | None:
         raw = spec.execution_limits.get("max_file_changes")
         try:
-            max_file_changes = int(raw)
+            max_file_changes = int(raw) if raw is not None else 0
         except (TypeError, ValueError):
             return None
         if max_file_changes <= 0:

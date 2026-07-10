@@ -3,11 +3,14 @@ from __future__ import annotations
 import operator
 import re
 import time
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from evolva.storage import append_jsonl, read_jsonl
+from evolva.storage import append_jsonl, atomic_write_jsonl, read_jsonl
 
 
 @dataclass(frozen=True)
@@ -82,11 +85,18 @@ class ObservabilitySink:
         *,
         enabled: bool = True,
         rules: list[AlertRule] | None = None,
+        metrics_retention_records: int = 10_000,
+        alerts_retention_records: int = 2_000,
+        context_provider: Callable[[], dict[str, Any]] | None = None,
     ):
         self.metrics_file = metrics_file
         self.alerts_file = alerts_file
         self.enabled = enabled
         self.rules = list(rules if rules is not None else DEFAULT_ALERT_RULES)
+        self.metrics_retention_records = max(100, int(metrics_retention_records))
+        self.alerts_retention_records = max(100, int(alerts_retention_records))
+        self.context_provider = context_provider
+        self._writes = 0
         self.metrics_file.parent.mkdir(parents=True, exist_ok=True)
         self.alerts_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -100,12 +110,13 @@ class ObservabilitySink:
         fields: dict[str, Any] | None = None,
         ts: float | None = None,
     ) -> MetricRecord:
+        context_tags = self.context_provider() if self.context_provider is not None else {}
         record = MetricRecord(
             ts=ts or time.time(),
             name=name,
             value=float(value),
             unit=unit,
-            tags=_string_tags(tags or {}),
+            tags=_string_tags({**context_tags, **(tags or {})}),
             fields=dict(fields or {}),
         )
         if not self.enabled:
@@ -113,7 +124,21 @@ class ObservabilitySink:
         append_jsonl(self.metrics_file, record.to_dict())
         for alert in self.evaluate(record):
             append_jsonl(self.alerts_file, alert.to_dict())
+        self._writes += 1
+        if self._writes % 100 == 0:
+            self.prune()
         return record
+
+    def prune(self) -> dict[str, int]:
+        metrics = read_jsonl(self.metrics_file)
+        alerts = read_jsonl(self.alerts_file)
+        trimmed_metrics = metrics[-self.metrics_retention_records :]
+        trimmed_alerts = alerts[-self.alerts_retention_records :]
+        if len(trimmed_metrics) != len(metrics):
+            atomic_write_jsonl(self.metrics_file, trimmed_metrics)
+        if len(trimmed_alerts) != len(alerts):
+            atomic_write_jsonl(self.alerts_file, trimmed_alerts)
+        return {"metrics_removed": len(metrics) - len(trimmed_metrics), "alerts_removed": len(alerts) - len(trimmed_alerts)}
 
     def evaluate(self, record: MetricRecord) -> list[AlertEvent]:
         events: list[AlertEvent] = []
@@ -232,6 +257,51 @@ class ObservabilitySink:
                 labels = {"rule": alert.rule, "severity": alert.severity, "metric": alert.metric, **alert.tags}
                 lines.append(f"evolva_alert_active{_prometheus_labels(labels)} 1")
         return "\n".join(lines) + "\n"
+
+    def render_otlp_json(self, *, limit: int = 1000) -> str:
+        """Render a dependency-free OTLP-shaped JSON payload for external shippers."""
+
+        points = []
+        for record in self.recent_metrics(limit=limit):
+            points.append(
+                {
+                    "name": record.name,
+                    "unit": record.unit,
+                    "gauge": {
+                        "dataPoints": [
+                            {
+                                "timeUnixNano": str(int(record.ts * 1_000_000_000)),
+                                "asDouble": record.value,
+                                "attributes": [{"key": key, "value": {"stringValue": value}} for key, value in sorted(record.tags.items())],
+                            }
+                        ]
+                    },
+                }
+            )
+        payload = {"resourceMetrics": [{"resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "evolva"}}]}, "scopeMetrics": [{"scope": {"name": "evolva"}, "metrics": points}]}]}
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    def serve_prometheus(self, host: str = "127.0.0.1", port: int = 9464) -> ThreadingHTTPServer:
+        sink = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                if self.path not in {"/", "/metrics"}:
+                    self.send_error(404)
+                    return
+                body = sink.render_prometheus().encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, _format: str, *_args: Any) -> None:
+                return
+
+        server = ThreadingHTTPServer((host, int(port)), Handler)
+        threading.Thread(target=server.serve_forever, name="evolva-prometheus", daemon=True).start()
+        return server
 
     def _recent_duplicate(self, rule: AlertRule, record: MetricRecord, *, now: float) -> bool:
         if rule.dedupe_seconds <= 0:

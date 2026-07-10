@@ -22,7 +22,7 @@ jobs:
       - name: Ruff
         run: python -m ruff check evolva tests
       - name: Type check
-        run: python -m mypy evolva/agent/capabilities.py evolva/agent/observability.py evolva/agent/redaction.py evolva/agent/sandbox.py evolva/storage.py
+        run: python -m mypy evolva
       - name: Compile
         run: python -m compileall evolva tests
       - name: Unit tests
@@ -37,3 +37,7 @@ jobs:
         run: python -m evolva.cli eval evals/tasks/repo_index.jsonl --yes --baseline evals/baselines/repo_index.json --min-score 1.0 --no-regression
       - name: Eval gate - security
         run: python -m evolva.cli eval evals/tasks/security.jsonl --yes --baseline evals/baselines/security.json --min-score 1.0 --no-regression
+      - name: Eval gate - scorers
+        run: python -m evolva.cli eval evals/tasks/scorers.jsonl --yes --baseline evals/baselines/scorers.json --min-score 1.0 --no-regression
+      - name: Eval gate - trace artifacts
+        run: python -m evolva.cli eval evals/tasks/trace_artifacts.jsonl --yes --baseline evals/baselines/trace_artifacts.json --min-score 1.0 --no-regression

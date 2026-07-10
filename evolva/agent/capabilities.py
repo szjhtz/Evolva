@@ -49,6 +49,7 @@ DEFAULT_TOOL_CAPABILITIES: dict[str, list[Capability]] = {
     "remember": [Capability.MEMORY],
     "recall": [Capability.MEMORY],
     "memory_status": [Capability.MEMORY],
+    "memory_verify": [Capability.MEMORY],
     "memory_audit": [Capability.MEMORY],
     "list_skills": [Capability.SKILL],
     "save_skill": [Capability.SKILL, Capability.WRITE_FILE],

@@ -5,11 +5,13 @@ import math
 import re
 import hashlib
 import time
+import os
+import importlib
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Iterable, Protocol
+from typing import Any, Iterable, Protocol
 
 
 @dataclass
@@ -25,6 +27,7 @@ class CodeChunk:
     text: str
     references: list[str] = field(default_factory=list)
     score: float = 0.0
+    embedding: list[float] = field(default_factory=list)
 
 
 @dataclass
@@ -57,6 +60,31 @@ class RepoIndexBackend(Protocol):
     name: str
 
     def chunk_file(self, rel: str, text: str, language: str) -> list[CodeChunk]: ...
+
+
+class EmbeddingProvider(Protocol):
+    name: str
+
+    def embed(self, texts: list[str]) -> list[list[float]]: ...
+
+
+def load_embedding_provider(spec: str | None = None) -> EmbeddingProvider | None:
+    """Load an optional local embedding provider from `module:attribute`."""
+
+    target = (spec if spec is not None else os.getenv("EVOLVA_REPO_EMBEDDING_PROVIDER", "")).strip()
+    if not target:
+        return None
+    module_name, separator, attribute = target.partition(":")
+    if not separator or not module_name or not attribute:
+        raise ValueError("embedding provider must use module:attribute")
+    module = importlib.import_module(module_name)
+    candidate: Any = getattr(module, attribute)
+    provider = candidate() if callable(candidate) and not hasattr(candidate, "embed") else candidate
+    if not hasattr(provider, "embed"):
+        raise TypeError(f"embedding provider `{target}` does not define embed(texts)")
+    if not getattr(provider, "name", ""):
+        provider.name = target
+    return provider
 
 
 class RepoIndex:
@@ -138,10 +166,18 @@ class RepoIndex:
     IMPORT_RE = re.compile(r"^\s*(?:from\s+([A-Za-z0-9_\.]+)\s+import\s+(.+)|import\s+(.+))", re.MULTILINE)
     MD_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
 
-    def __init__(self, root: Path, index_file: Path | None = None, *, max_file_bytes: int = 250_000):
+    def __init__(
+        self,
+        root: Path,
+        index_file: Path | None = None,
+        *,
+        max_file_bytes: int = 250_000,
+        embedding_provider: EmbeddingProvider | None = None,
+    ):
         self.root = root.resolve()
         self.index_file = (index_file or self.root / "evolva" / "repo_index" / "index.json").resolve()
         self.max_file_bytes = max_file_bytes
+        self.embedding_provider = embedding_provider or load_embedding_provider()
 
     def build(self, *, max_files: int = 1000, incremental: bool = True) -> RepoIndexSnapshot:
         """Build and persist a repository index snapshot."""
@@ -176,7 +212,9 @@ class RepoIndex:
                 continue
             file_record.sha256 = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
             files.append(file_record)
-            chunks.extend(self._chunk_file(rel, text, language))
+            new_chunks = self._chunk_file(rel, text, language)
+            self._embed_chunks(new_chunks)
+            chunks.extend(new_chunks)
             indexed_files += 1
         stats = {
             "chunks": len(chunks),
@@ -238,6 +276,9 @@ class RepoIndex:
             "symbol_chunks": True,
             "reference_tokens": True,
             "lexical_vectors": True,
+            "semantic_embeddings": self.embedding_provider is not None,
+            "embedding_provider": getattr(self.embedding_provider, "name", "none"),
+            "cross_file_reference_boost": True,
             "tree_sitter_available": backend.startswith("tree_sitter_available"),
         }
 
@@ -265,12 +306,13 @@ class RepoIndex:
         """Search indexed chunks by natural language, symbol, path, or reference."""
         snapshot = self.build_if_stale()
         query_tokens = self._token_counts(query)
-        if not query_tokens:
+        query_embedding = self._embed_query(query)
+        if not query_tokens and not query_embedding:
             return []
         ranked: list[CodeChunk] = []
         q_lower = query.lower()
         for chunk in snapshot.chunks:
-            score = self._score(query_tokens, q_lower, chunk)
+            score = self._score(query_tokens, q_lower, chunk, query_embedding=query_embedding)
             if score <= 0:
                 continue
             ranked.append(CodeChunk(**{**asdict(chunk), "score": round(score, 4)}))
@@ -439,11 +481,12 @@ class RepoIndex:
             references=self._identifier_refs(text)[:80],
         )
 
-    def _score(self, query_tokens: Counter[str], q_lower: str, chunk: CodeChunk) -> float:
+    def _score(self, query_tokens: Counter[str], q_lower: str, chunk: CodeChunk, *, query_embedding: list[float] | None = None) -> float:
         field = f"{chunk.path} {chunk.symbol} {chunk.kind} {' '.join(chunk.references)} {chunk.text}"
         doc_tokens = self._token_counts(field)
         cosine = self._cosine(query_tokens, doc_tokens)
-        if cosine <= 0:
+        semantic = self._vector_cosine(query_embedding or [], chunk.embedding)
+        if cosine <= 0 and semantic <= 0:
             return 0.0
         symbol_lower = chunk.symbol.lower()
         path_lower = chunk.path.lower()
@@ -452,7 +495,35 @@ class RepoIndex:
         path_boost = 0.7 if any(token in path_lower for token in query_tokens) else 0.0
         text_boost = 0.4 if q_lower and q_lower in text_lower else 0.0
         fuzzy = SequenceMatcher(None, q_lower, f"{path_lower} {symbol_lower}").ratio() * 0.25
-        return cosine + symbol_boost + path_boost + text_boost + fuzzy
+        reference_boost = 0.8 if any(token in {ref.lower() for ref in chunk.references} for token in query_tokens) else 0.0
+        return cosine + semantic * 1.5 + symbol_boost + path_boost + text_boost + fuzzy + reference_boost
+
+    def _embed_chunks(self, chunks: list[CodeChunk]) -> None:
+        if self.embedding_provider is None or not chunks:
+            return
+        try:
+            vectors = self.embedding_provider.embed([f"{chunk.path}\n{chunk.symbol}\n{chunk.text}" for chunk in chunks])
+        except Exception:
+            return
+        for chunk, vector in zip(chunks, vectors):
+            chunk.embedding = [float(value) for value in vector]
+
+    def _embed_query(self, query: str) -> list[float]:
+        if self.embedding_provider is None:
+            return []
+        try:
+            rows = self.embedding_provider.embed([query])
+            return [float(value) for value in rows[0]] if rows else []
+        except Exception:
+            return []
+
+    def _vector_cosine(self, left: list[float], right: list[float]) -> float:
+        if not left or not right or len(left) != len(right):
+            return 0.0
+        dot = sum(a * b for a, b in zip(left, right))
+        left_norm = math.sqrt(sum(value * value for value in left))
+        right_norm = math.sqrt(sum(value * value for value in right))
+        return dot / max(1e-9, left_norm * right_norm)
 
     def _token_counts(self, text: str) -> Counter[str]:
         tokens: list[str] = []
