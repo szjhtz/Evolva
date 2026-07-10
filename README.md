@@ -30,7 +30,7 @@
   <img src="assets/tui-mockup.svg" alt="Evolva TUI Workbench" width="100%" />
 </p>
 
-Evolva 不是另一个聊天壳。它把一次工程任务变成可检查的运行过程：
+把 Agent 放进真实仓库，问题就不只是“答得对不对”：它还要找得到上下文、管得住工具、失败后接得上，结果也得经得起复查。Evolva 就是围绕这几件事做的。
 
 ```text
 Plan -> Act -> Observe -> Evaluate -> Evolve

@@ -30,7 +30,7 @@
   <img src="assets/tui-mockup.svg" alt="Evolva TUI Workbench" width="100%" />
 </p>
 
-Evolva is not another chat wrapper. It turns an engineering task into an inspectable runtime process:
+Once an agent starts working in a real repository, answer quality is only part of the job. It also needs to find the right context, use tools within clear limits, recover from failures, and leave a record people can review. Evolva is built around those needs.
 
 ```text
 Plan -> Act -> Observe -> Evaluate -> Evolve
