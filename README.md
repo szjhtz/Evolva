@@ -66,6 +66,7 @@ evolva
 分析这个项目的风险         直接开始任务
 /trace list                查看任务执行记录
 /session list              查看持久化会话
+/resume                    查看并续跑中断的 Agent 任务
 /cancel                    停止当前任务，也可按 Ctrl+K
 ```
 
@@ -78,9 +79,9 @@ evolva
 | 场景 | Evolva 提供什么 | 入口 |
 | --- | --- | --- |
 | 理解仓库 | 文件、符号、引用和可插拔语义检索 | `/repo` |
-| 执行任务 | 受 Policy 与审批约束的文件、Shell、Python、Web 和 MCP 工具 | 对话 / `/run` |
+| 执行任务 | 动态选择相关工具，支持原生 tool calling、局部补丁、diff 与测试 | 对话 / `/run` |
 | 处理复杂流程 | 可恢复 Workflow 与带质量门的 Loop | `/workflow` / `/loop` |
-| 组织协作 | Task Router、受限子 Agent、并行角色和结果综合 | `/agents` |
+| 组织协作 | Task Router、依赖 DAG、受限子 Agent、冲突检测和综合裁决 | `/agents` |
 | 复盘与回归 | Trace、Artifact manifest、Replay 和 JSONL Eval | `/trace` / `evolva eval` |
 | 沉淀经验 | 有命名空间、TTL、冲突检测和验证门的 Memory / Skill | `/memory` / `/dream` |
 
@@ -92,9 +93,11 @@ evolva
 
 架构分成三条主线：
 
-1. **Reasoning & State**：TUI、Core、Session、Context 和 Repo Index 组织任务上下文。
+1. **Reasoning & State**：TUI、Core、Session、Context 和 Repo Index 按相关性与预算组织任务上下文。
 2. **Guarded Execution**：工具调用经过 Policy、审批与 Sandbox；生产命令执行要求强隔离。
-3. **Evidence & Learning**：Trace 和 Eval 负责证明结果，Dream 只提升通过 verifier 的经验。
+3. **Evidence & Learning**：主循环在结束前检查 diff、回读或测试证据；失败会受限恢复，中断可从 checkpoint 续跑，经验通过 verifier 后才会晋级。
+
+模型可按任务分层并在故障时有序降级：`EVOLVA_MODEL_FAST`、`EVOLVA_MODEL_CODING`、`EVOLVA_MODEL_REASONING` 和逗号分隔的 `EVOLVA_MODEL_FALLBACKS`。未设置时继续使用 `OPENAI_MODEL`，不改变现有配置。
 
 ## Loop Engineering
 
@@ -259,6 +262,7 @@ evolva migrate state --apply
 /config wizard                  配置模型
 /session list|new|use|rename    管理会话
 /session fork|retry             分支或重跑最近一轮
+/resume [run_id|latest]         查看或续跑中断的 Agent 任务
 /cancel                         停止当前任务
 /repo build|status|search       管理仓库索引
 /trace list|show|context        查看执行证据
@@ -294,7 +298,7 @@ uv run coverage report
 uv build
 ```
 
-CI 还会运行 `smoke`、`repo_index`、`security`、`scorers` 和 `trace_artifacts` 五组 Eval baseline。
+CI 还会运行 `smoke`、`repo_index`、`security`、`scorers`、`trace_artifacts` 和 43 项 `agent_quality` Eval baseline。
 
 ## 项目治理
 

@@ -7,10 +7,18 @@ import random
 import threading
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from evolva.config import AgentConfig
+
+
+@dataclass
+class LLMToolCall:
+    id: str
+    name: str
+    arguments: dict[str, Any]
+    raw_arguments: str = ""
 
 
 @dataclass
@@ -23,6 +31,8 @@ class LLMResponse:
     request_id: str = ""
     model: str = ""
     finish_reason: str = ""
+    tool_calls: list[LLMToolCall] = field(default_factory=list)
+    assistant_message: dict[str, Any] | None = None
 
 
 class CancellationToken:
@@ -59,13 +69,19 @@ class OpenAICompatibleLLM:
         temperature: float | None = None,
         timeout: int | None = None,
         cancellation_token: CancellationToken | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        model: str | None = None,
     ) -> LLMResponse:
         if not self.available:
             raise RuntimeError("OPENAI_API_KEY is not configured")
         payload: dict[str, Any] = {
-            "model": self.config.model,
+            "model": model or self.config.model,
             "messages": messages,
         }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = tool_choice or "auto"
         resolved_temperature = self.config.temperature if temperature is None else temperature
         if resolved_temperature is not None:
             payload["temperature"] = resolved_temperature
@@ -146,13 +162,14 @@ class OpenAICompatibleLLM:
         temperature: float | None = None,
         timeout: int | None = None,
         cancellation_token: CancellationToken | None = None,
+        model: str | None = None,
     ) -> LLMResponse:
         """Stream a plain chat completion through an OpenAI-compatible SSE API."""
 
         if not self.available:
             raise RuntimeError("OPENAI_API_KEY is not configured")
         payload: dict[str, Any] = {
-            "model": self.config.model,
+            "model": model or self.config.model,
             "messages": messages,
             "stream": True,
             "stream_options": {"include_usage": True},
@@ -174,7 +191,7 @@ class OpenAICompatibleLLM:
         )
         chunks: list[str] = []
         usage: dict[str, Any] | None = None
-        model = self.config.model
+        response_model = model or self.config.model
         finish_reason = ""
         consumed = 0
         limit = max(1024, int(getattr(self.config, "llm_max_response_bytes", 10_000_000)))
@@ -200,7 +217,7 @@ class OpenAICompatibleLLM:
                     event = json.loads(data)
                     if isinstance(event.get("usage"), dict):
                         usage = event["usage"]
-                    model = str(event.get("model") or model)
+                    response_model = str(event.get("model") or response_model)
                     choices = event.get("choices")
                     if not isinstance(choices, list) or not choices:
                         continue
@@ -224,7 +241,7 @@ class OpenAICompatibleLLM:
             retries=0,
             usage=usage,
             request_id=request_id,
-            model=model,
+            model=response_model,
             finish_reason=finish_reason,
         )
 
@@ -254,12 +271,16 @@ class OpenAICompatibleLLM:
 
     def _content_from_raw(self, raw: dict[str, Any]) -> str:
         try:
-            return str(raw["choices"][0]["message"]["content"])
+            content = raw["choices"][0]["message"].get("content")
+            return content if isinstance(content, str) else ""
         except (KeyError, IndexError, TypeError) as exc:
             raise RuntimeError("LLM response missing choices[0].message.content") from exc
 
     def _response(self, raw: dict[str, Any], *, attempts: int, retries: int) -> LLMResponse:
         choice = raw.get("choices", [{}])[0] if isinstance(raw.get("choices"), list) and raw.get("choices") else {}
+        message = choice.get("message", {}) if isinstance(choice, dict) else {}
+        message = message if isinstance(message, dict) else {}
+        tool_calls = self._tool_calls_from_message(message)
         usage = raw.get("usage") if isinstance(raw.get("usage"), dict) else None
         headers = getattr(self._response_state, "headers", {})
         request_id = str(headers.get("x-request-id") or raw.get("id") or "")
@@ -272,7 +293,31 @@ class OpenAICompatibleLLM:
             request_id=request_id,
             model=str(raw.get("model") or self.config.model),
             finish_reason=str(choice.get("finish_reason") or "") if isinstance(choice, dict) else "",
+            tool_calls=tool_calls,
+            assistant_message=message,
         )
+
+    def _tool_calls_from_message(self, message: dict[str, Any]) -> list[LLMToolCall]:
+        calls: list[LLMToolCall] = []
+        raw_calls = message.get("tool_calls")
+        if not isinstance(raw_calls, list):
+            return calls
+        for index, raw_call in enumerate(raw_calls):
+            if not isinstance(raw_call, dict):
+                continue
+            function = raw_call.get("function")
+            if not isinstance(function, dict):
+                continue
+            name = str(function.get("name") or "").strip()
+            raw_arguments = function.get("arguments")
+            raw_arguments = raw_arguments if isinstance(raw_arguments, str) else json.dumps(raw_arguments or {})
+            try:
+                arguments = json.loads(raw_arguments)
+            except json.JSONDecodeError:
+                arguments = {}
+            if name and isinstance(arguments, dict):
+                calls.append(LLMToolCall(str(raw_call.get("id") or f"call_{index}"), name, arguments, raw_arguments))
+        return calls
 
     def _sleep_before_retry(
         self,

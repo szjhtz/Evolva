@@ -83,6 +83,7 @@ class ScorerContext:
     duration_ms: int | None = None
     agent: Any = None
     trace_run_id: str = ""
+    metrics: dict[str, Any] = field(default_factory=dict)
 
     @property
     def text(self) -> str:
@@ -159,6 +160,10 @@ class ScorerRegistry:
             ("expected_tool_sequence", "tool_sequence"),
             ("max_duration_ms", "latency"),
             ("command_checks", "command"),
+            ("expected_selected_tools", "selected_tools"),
+            ("forbidden_selected_tools", "selected_tools"),
+            ("max_tool_calls", "tool_budget"),
+            ("max_prompt_chars", "prompt_budget"),
         ]
         for key, scorer in implicit:
             if key in task and scorer not in selected:
@@ -187,7 +192,32 @@ def build_default_registry() -> ScorerRegistry:
     registry.register("policy_audit", policy_audit_scorer)
     registry.register("tool_sequence", tool_sequence_scorer)
     registry.register("command", command_scorer)
+    registry.register("selected_tools", selected_tools_scorer)
+    registry.register("tool_budget", tool_budget_scorer)
+    registry.register("prompt_budget", prompt_budget_scorer)
     return registry
+
+
+def selected_tools_scorer(task: dict[str, Any], context: ScorerContext) -> Iterable[ScoreCheck]:
+    selected = {str(name) for name in context.metrics.get("selected_tools", [])}
+    for expected in task.get("expected_selected_tools", []):
+        name = str(expected)
+        yield ScoreCheck(f"selected_tool:{name}", name in selected, "tool_selection", expected=name, actual=sorted(selected))
+    for forbidden in task.get("forbidden_selected_tools", []):
+        name = str(forbidden)
+        yield ScoreCheck(f"forbidden_tool:{name}", name not in selected, "tool_selection", expected=f"not {name}", actual=sorted(selected))
+
+
+def tool_budget_scorer(task: dict[str, Any], context: ScorerContext) -> Iterable[ScoreCheck]:
+    limit = int(task.get("max_tool_calls", 0))
+    actual = int(context.metrics.get("tool_call_count", 0))
+    yield ScoreCheck("tool_call_budget", actual <= limit, "efficiency", expected=limit, actual=actual)
+
+
+def prompt_budget_scorer(task: dict[str, Any], context: ScorerContext) -> Iterable[ScoreCheck]:
+    limit = int(task.get("max_prompt_chars", 0))
+    actual = int(context.metrics.get("prompt_chars", 0))
+    yield ScoreCheck("prompt_char_budget", actual <= limit, "efficiency", expected=limit, actual=actual)
 
 
 def contains_scorer(task: dict[str, Any], context: ScorerContext) -> Iterable[ScoreCheck]:

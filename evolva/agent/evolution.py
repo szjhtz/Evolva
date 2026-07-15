@@ -23,6 +23,8 @@ class EvolutionReport:
     skill_path: str | None = None
     memory_written: bool = False
     deduped: bool = False
+    asset_status: str = "candidate"
+    promotion_ready: bool = False
     ts: float = 0.0
 
     def __post_init__(self) -> None:
@@ -36,7 +38,7 @@ class EvolutionReport:
 
     def summary(self) -> str:
         status = "deduped" if self.deduped else "created"
-        return f"[{self.trigger}/{self.category}/{status}/{self.fingerprint}] {self.lesson}"
+        return f"[{self.trigger}/{self.category}/{self.asset_status}/{status}/{self.fingerprint}] {self.lesson}"
 
     @staticmethod
     def compute_fingerprint(lesson: str, category: str) -> str:
@@ -61,6 +63,7 @@ class SelfEvolutionEngine:
         category: str | None = None,
         evidence: list[str] | None = None,
         confidence: float | None = None,
+        promote: bool | None = None,
     ) -> EvolutionReport:
         feedback = feedback.strip() or "No explicit feedback; summarize recent outcome."
         category = category or self._classify(feedback, task=task, outcome=outcome, trigger=trigger)
@@ -69,27 +72,55 @@ class SelfEvolutionEngine:
         evidence = self._normalize_evidence(evidence or [], task=task, outcome=outcome)
         lesson = self._lesson_from(feedback, task=task, outcome=outcome, category=category, actions=actions, evidence=evidence)
         fingerprint = EvolutionReport.compute_fingerprint(lesson, category)
+        promote = self._trusted_promotion_trigger(trigger) if promote is None else bool(promote)
+        asset_status = "active" if promote else "candidate"
 
-        duplicate = self.memory.find_similar("lesson", lesson)
+        duplicate = self.memory.find_similar("lesson", lesson, statuses={"active", "candidate", "verified"})
+        if duplicate is not None:
+            lesson = duplicate.content
+            source_parts = duplicate.source.split(":")
+            if source_parts and source_parts[0] == "self_evolution":
+                fingerprint = source_parts[-1]
+            asset_status = duplicate.status
+            promote = duplicate.status == "active"
         memory_written = duplicate is None
         if memory_written:
             source = f"self_evolution:{trigger}:{category}:{fingerprint}"
-            self.memory.add("lesson", lesson, confidence=confidence, source=source)
+            self.memory.add(
+                "lesson",
+                lesson,
+                confidence=confidence,
+                source=source,
+                evidence=evidence,
+                status=asset_status,
+                verified=promote,
+            )
 
-        skill_name = self._skill_name(feedback or task or lesson, category=category)
-        skill_body = self._skill_body(lesson, category=category, actions=actions, evidence=evidence, fingerprint=fingerprint)
-        path = self.skills.upsert(
-            skill_name,
-            skill_body,
-            metadata={
-                "source": "self_evolution",
-                "trigger": trigger,
-                "category": category,
-                "confidence": f"{confidence:.2f}",
-                "fingerprint": fingerprint,
-                "deduped": str(duplicate is not None).lower(),
-            },
+        existing_skill = next(
+            (skill for skill in self.skills.list() if str((skill.metadata or {}).get("fingerprint") or "") == fingerprint),
+            None,
         )
+        if duplicate is not None and existing_skill is not None:
+            skill_name = existing_skill.name
+            path = existing_skill.path
+        else:
+            skill_name = self._skill_name(feedback or task or lesson, category=category)
+            skill_body = self._skill_body(lesson, category=category, actions=actions, evidence=evidence, fingerprint=fingerprint)
+            path = self.skills.upsert(
+                skill_name,
+                skill_body,
+                metadata={
+                    "source": "self_evolution",
+                    "trigger": trigger,
+                    "category": category,
+                    "confidence": f"{confidence:.2f}",
+                    "fingerprint": fingerprint,
+                    "deduped": str(duplicate is not None).lower(),
+                    "status": asset_status,
+                    "verified": str(promote).lower(),
+                    "evidence_sources": sorted(self._evidence_sources(evidence)),
+                },
+            )
         return EvolutionReport(
             lesson=lesson,
             trigger=trigger,
@@ -102,7 +133,92 @@ class SelfEvolutionEngine:
             skill_path=str(path),
             memory_written=memory_written,
             deduped=duplicate is not None,
+            asset_status=asset_status,
+            promotion_ready=promote,
         )
+
+    def promote_fingerprint(
+        self,
+        fingerprint: str,
+        *,
+        evidence: list[str],
+        regression_passed: bool,
+        min_independent_sources: int = 2,
+    ) -> dict[str, Any]:
+        """Promote a staged lesson and skill only after an evidence gate passes."""
+
+        fingerprint = fingerprint.strip()
+        sources = self._evidence_sources(evidence)
+        result: dict[str, Any] = {
+            "fingerprint": fingerprint,
+            "promoted": False,
+            "regression_passed": bool(regression_passed),
+            "evidence_sources": sorted(sources),
+            "reason": "",
+        }
+        if not fingerprint:
+            result["reason"] = "fingerprint is required"
+            return result
+        if not regression_passed:
+            result["reason"] = "regression verification did not pass"
+            return result
+        if len(sources) < max(1, int(min_independent_sources)):
+            result["reason"] = f"requires {max(1, int(min_independent_sources))} independent evidence sources"
+            return result
+        memories = [
+            item
+            for item in self.memory.all(100000, include_expired=True, namespace=None)
+            if item.kind == "lesson" and item.source.endswith(f":{fingerprint}") and item.status in {"candidate", "verified"}
+        ]
+        active_memories = [
+            item
+            for item in self.memory.all(100000, include_expired=True, namespace=None)
+            if item.kind == "lesson" and item.source.endswith(f":{fingerprint}") and item.status == "active"
+        ]
+        if active_memories:
+            result.update(
+                {
+                    "promoted": True,
+                    "memories": [item.id for item in active_memories],
+                    "skills": [
+                        skill.name
+                        for skill in self.skills.list()
+                        if str((skill.metadata or {}).get("fingerprint") or "") == fingerprint
+                        and str((skill.metadata or {}).get("status") or "active") == "active"
+                    ],
+                    "reason": "candidate already promoted",
+                }
+            )
+            return result
+        if not memories:
+            result["reason"] = "candidate memory not found"
+            return result
+        if any(item.conflicts_with for item in memories):
+            result["reason"] = "candidate conflicts with active memory"
+            return result
+        verification_note = "regression_passed; sources=" + ",".join(sorted(sources))
+        promoted_memories: list[str] = []
+        for item in memories:
+            self.memory.add_evidence(item.id, evidence)
+            self.memory.verify(item.id, evidence=verification_note)
+            if self.memory.promote(item.id, evidence="candidate promotion gate passed"):
+                promoted_memories.append(item.id)
+        promoted_skills: list[str] = []
+        for skill in self.skills.list():
+            if str((skill.metadata or {}).get("fingerprint") or "") != fingerprint:
+                continue
+            self.skills.verify(skill.name, evidence=verification_note)
+            if self.skills.promote(skill.name, evidence="candidate promotion gate passed"):
+                promoted_skills.append(skill.name)
+        result.update(
+            {
+                "promoted": bool(promoted_memories),
+                "memories": promoted_memories,
+                "skills": promoted_skills,
+                "reason": "promotion gate passed" if promoted_memories else "candidate promotion failed",
+            }
+        )
+        return result
 
     def reflect_after_turn(self, user_message: str, final_answer: str, failed_tools: list[str]) -> EvolutionReport | None:
         if not failed_tools and len(final_answer) < 4000:
@@ -255,6 +371,26 @@ class SelfEvolutionEngine:
         if trigger == "quality_signal":
             return 0.72
         return 0.75
+
+    @staticmethod
+    def _trusted_promotion_trigger(trigger: str) -> bool:
+        return trigger == "manual_feedback" or trigger.startswith("dream_promote:")
+
+    @staticmethod
+    def _evidence_sources(evidence: list[str]) -> set[str]:
+        sources: set[str] = set()
+        for item in evidence:
+            text = str(item).strip()
+            if not text:
+                continue
+            if ":" in text:
+                source = text.split(":", 1)[0]
+            elif "=" in text:
+                source = text.split("=", 1)[0]
+            else:
+                source = text.split(None, 1)[0]
+            sources.add(source.strip().lower() or "unknown")
+        return sources
 
     def _lesson_from(self, feedback: str, *, task: str, outcome: str, category: str, actions: list[str], evidence: list[str]) -> str:
         bits = [f"Category: {category}", f"Feedback: {feedback}"]

@@ -7,11 +7,12 @@ from pathlib import Path
 from difflib import SequenceMatcher
 
 from evolva.agent.redaction import Redactor
+from evolva.agent.relevance import relevance_score, text_tokens
 from evolva.storage import append_jsonl, atomic_write_jsonl, read_jsonl
 
 
 ACTIVE_MEMORY_STATUSES = {"active"}
-INACTIVE_MEMORY_STATUSES = {"draft", "quarantined", "rolled_back"}
+INACTIVE_MEMORY_STATUSES = {"draft", "candidate", "verified", "quarantined", "rolled_back"}
 VALID_MEMORY_STATUSES = ACTIVE_MEMORY_STATUSES | INACTIVE_MEMORY_STATUSES
 DEFAULT_CONTEXT_MIN_CONFIDENCE = 0.5
 
@@ -124,7 +125,15 @@ class MemoryStore:
         """Mark a memory as rolled back without deleting historical evidence."""
         return self.update_status(item_id, "rolled_back", reason=reason)
 
-    def find_similar(self, kind: str, content: str, *, threshold: float = 0.92, limit: int = 500) -> MemoryItem | None:
+    def find_similar(
+        self,
+        kind: str,
+        content: str,
+        *,
+        threshold: float = 0.92,
+        limit: int = 500,
+        statuses: set[str] | None = ACTIVE_MEMORY_STATUSES,
+    ) -> MemoryItem | None:
         """Return a near-duplicate memory item when one already exists."""
         normalized = self._normalize(content)
         if not normalized:
@@ -132,7 +141,7 @@ class MemoryStore:
         for item in reversed(self.all(limit)):
             if item.kind != kind:
                 continue
-            if item.status not in ACTIVE_MEMORY_STATUSES:
+            if statuses is not None and item.status not in statuses:
                 continue
             other = self._normalize(item.content)
             if not other:
@@ -202,7 +211,7 @@ class MemoryStore:
         if not q:
             items = self.all(10000, include_expired=include_expired, namespace=namespace or self.namespace)
             return self._filter_items(items, min_confidence=min_confidence, statuses=allowed_statuses)[-limit:]
-        scored: list[tuple[int, MemoryItem]] = []
+        scored: list[tuple[float, MemoryItem]] = []
         for item in self.all(1000, include_expired=include_expired, namespace=namespace or self.namespace):
             if allowed_statuses is not None and item.status not in allowed_statuses:
                 continue
@@ -211,9 +220,7 @@ class MemoryStore:
             if self.require_verification and not item.verified:
                 continue
             hay = f"{item.kind} {item.content} {item.source} {' '.join(item.evidence or [])}".lower()
-            score = sum(1 for token in q.split() if token in hay)
-            if q in hay:
-                score += 3
+            score = relevance_score(q, hay)
             if score:
                 scored.append((score, item))
         scored.sort(key=lambda x: (x[0], x[1].ts), reverse=True)
@@ -248,7 +255,7 @@ class MemoryStore:
 
     def find_conflicts(self, kind: str, content: str, *, namespace: str | None = None, limit: int = 500) -> list[MemoryItem]:
         normalized = self._normalize(content)
-        tokens = set(normalized.split())
+        tokens = text_tokens(normalized)
         if not tokens:
             return []
         negations = {"not", "never", "no", "without", "禁止", "不能", "不要", "非"}
@@ -257,7 +264,7 @@ class MemoryStore:
         for item in reversed(self.all(limit, namespace=namespace or self.namespace)):
             if item.kind != kind or item.status != "active":
                 continue
-            other_tokens = set(self._normalize(item.content).split())
+            other_tokens = text_tokens(self._normalize(item.content))
             overlap = len(tokens & other_tokens) / max(1, min(len(tokens), len(other_tokens)))
             if overlap >= 0.55 and polarity != bool(other_tokens & negations):
                 matches.append(item)
@@ -270,6 +277,37 @@ class MemoryStore:
             if item.id != item_id:
                 continue
             item.verified = True
+            item.status = "verified"
+            item.evidence = [*(item.evidence or []), self.redactor.redact_text(evidence)]
+            item.version += 1
+            changed = True
+        if changed:
+            atomic_write_jsonl(self.path, [asdict(item) for item in items])
+        return changed
+
+    def add_evidence(self, item_id: str, evidence: list[str]) -> bool:
+        safe = self.redactor.redact_json(evidence)
+        additions = [str(item).strip() for item in safe if str(item).strip()] if isinstance(safe, list) else []
+        items = self.all(100000, include_expired=True, namespace=None)
+        changed = False
+        for item in items:
+            if item.id != item_id:
+                continue
+            item.evidence = list(dict.fromkeys([*(item.evidence or []), *additions]))
+            item.version += 1
+            changed = True
+        if changed:
+            atomic_write_jsonl(self.path, [asdict(item) for item in items])
+        return changed
+
+    def promote(self, item_id: str, *, evidence: str) -> bool:
+        items = self.all(100000, include_expired=True, namespace=None)
+        changed = False
+        for item in items:
+            if item.id != item_id:
+                continue
+            if item.status != "verified" or not item.verified or item.conflicts_with:
+                return False
             item.status = "active"
             item.evidence = [*(item.evidence or []), self.redactor.redact_text(evidence)]
             item.version += 1

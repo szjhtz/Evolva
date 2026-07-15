@@ -8,9 +8,10 @@ from pathlib import Path
 from typing import Any
 
 from evolva.agent.redaction import Redactor
+from evolva.agent.relevance import relevance_score
 
 ACTIVE_SKILL_STATUSES = {"active"}
-INACTIVE_SKILL_STATUSES = {"draft", "deprecated", "disabled", "quarantined"}
+INACTIVE_SKILL_STATUSES = {"draft", "candidate", "verified", "deprecated", "disabled", "quarantined"}
 VALID_SKILL_STATUSES = ACTIVE_SKILL_STATUSES | INACTIVE_SKILL_STATUSES
 
 
@@ -59,7 +60,7 @@ class SkillStore:
     def match(self, query: str, *, limit: int = 5, include_inactive: bool = False) -> builtins.list[Skill]:
         """Return skills selected by manifest triggers and lexical relevance."""
         q = query.lower().strip()
-        scored: builtins.list[tuple[int, Skill]] = []
+        scored: builtins.list[tuple[float, Skill]] = []
         for skill in self.list():
             metadata = skill.metadata or {}
             if skill.name != "general_agent" and str(metadata.get("namespace") or "default") != self.namespace:
@@ -68,8 +69,8 @@ class SkillStore:
                 continue
             triggers = self._metadata_list(metadata.get("triggers")) + self._metadata_list(metadata.get("keywords"))
             hay = (skill.name + "\n" + skill.content + "\n" + " ".join(triggers)).lower()
-            score = sum(2 for trigger in triggers if trigger.lower() and trigger.lower() in q)
-            score += sum(1 for token in q.split() if token in hay)
+            score = sum(2.0 for trigger in triggers if trigger.lower() and relevance_score(q, trigger) > 0)
+            score += relevance_score(q, hay)
             if not q or score:
                 scored.append((score, skill))
         scored.sort(key=lambda item: (item[0], item[1].name), reverse=True)
@@ -81,7 +82,7 @@ class SkillStore:
             return "No skills."
         selected = self.match(query, limit=5)
         if not selected:
-            selected = skills[:3]
+            selected = [skill for skill in skills if skill.name == "general_agent"]
         return "\n\n".join(f"## {s.name}\n{s.content[:1500]}" for s in selected[:5])
 
     def upsert(self, name: str, content: str, *, metadata: dict[str, Any] | None = None) -> Path:
@@ -127,6 +128,27 @@ class SkillStore:
             metadata["created_at"] = metadata["updated_at"]
         path.write_text(self._with_frontmatter(safe, body.strip(), metadata) + "\n", encoding="utf-8")
         return True
+
+    def verify(self, name: str, *, evidence: str) -> bool:
+        safe = re.sub(r"[^a-zA-Z0-9_-]+", "_", name.strip().lower()).strip("_")
+        path = self.directory / f"{safe}.md"
+        if not path.exists():
+            return False
+        raw = path.read_text(encoding="utf-8")
+        metadata, body = self._parse_frontmatter(raw)
+        metadata = dict(metadata or {})
+        metadata.update({"status": "verified", "verified": "true", "verification_evidence": self.redactor.redact_text(evidence)})
+        path.write_text(self._with_frontmatter(safe, body.strip(), metadata) + "\n", encoding="utf-8")
+        return True
+
+    def promote(self, name: str, *, evidence: str) -> bool:
+        skill = next((item for item in self.list() if item.name == name), None)
+        if skill is None:
+            return False
+        metadata = skill.metadata or {}
+        if self._status(metadata) != "verified" or str(metadata.get("verified", "false")).lower() not in {"1", "true", "yes"}:
+            return False
+        return self.set_status(name, "active", reason=evidence)
 
     def stats(self) -> dict[str, int]:
         skills = self.list()

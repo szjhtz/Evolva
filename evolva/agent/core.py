@@ -8,6 +8,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from evolva.agent.context import ContextStore
+from evolva.agent.checkpoints import AgentCheckpointStore
 from evolva.agent.artifacts import ArtifactManifest
 from evolva.agent.dream import DreamEngine
 from evolva.agent.evolution import SelfEvolutionEngine
@@ -15,39 +16,41 @@ from evolva.agent.images import user_content_with_images
 from evolva.agent.llm import CancellationToken, OpenAICompatibleLLM
 from evolva.agent.memory import MemoryStore
 from evolva.agent.mcp import MCPManager
+from evolva.agent.model_router import ModelRouter
 from evolva.agent.multi_agent import MultiAgentCoordinator
 from evolva.agent.observability import ObservabilitySink
 from evolva.agent.policy import PolicyConfig, PolicyDecision, PolicyEngine
+from evolva.agent.relevance import bounded_sections
 from evolva.agent.sandbox import Sandbox, SandboxPolicy
 from evolva.agent.sessions import AgentSession, SessionStore
 from evolva.agent.skills import SkillStore
 from evolva.agent.todo import TodoStore
 from evolva.agent.tracing import TraceRecorder
+from evolva.agent.tool_router import ToolRouter
 from evolva.agent.langgraph_runtime import EvolvaLangGraphRuntime
 from evolva.config import AgentConfig
 from evolva.tools.base import ToolRegistry, ToolResult
 from evolva.tools.builtin import build_registry
 
 
-SYSTEM_PROMPT = """You are Evolva, a local self-evolving super-agent harness.
-You can plan, call tools, manage persistent context, maintain a todo list, delegate to role agents, execute inside a sandbox, remember facts, use skills, and improve yourself.
+SYSTEM_PROMPT = """You are Evolva, a local agent for completing verifiable work in the user's repository.
+Inspect evidence before making assumptions, use the smallest relevant tool set, and verify changed behavior before finishing.
 
-Return exactly one JSON object per step:
+Use native tool calls when the provider supports them. Otherwise return exactly one JSON object per step:
 {
-  "thought": "brief reasoning",
   "plan": ["short step", "..."],
   "tool": {"name": "tool_name", "args": {...}} | null,
   "final": "final answer to user, or null if you need a tool"
 }
 
 Rules:
-- Use todo tools for multi-step work: create todos early, update statuses as work progresses, and close them when done.
-- Use context tools to record important notes, artifacts, summaries, and decisions.
-- Use delegate_agent/collaborate for multi-agent planning, research, coding advice, or review.
+- Use todo tools only when persistent progress tracking helps the task.
+- Record durable context, memory, or skills only when evidence makes them reusable.
+- Delegate only independent work that benefits from a separate role and budget.
 - Use sandbox_info and sandboxed file/shell/python tools for local work.
 - Prefer safe, reversible actions. Do not fabricate tool outputs.
+- For code changes, inspect the relevant file, patch narrowly, inspect the diff, and run the lightest meaningful verification.
 - When finished, set tool=null and final to a helpful answer.
-- If a task teaches a reusable lesson, call remember or save_skill before final.
 """
 
 
@@ -58,6 +61,8 @@ class TurnResult:
     failed_tools: list[str] = field(default_factory=list)
     stopped_by_limit: bool = False
     cancelled: bool = False
+    run_id: str = ""
+    verification: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -78,6 +83,7 @@ class EvolvaAgent:
         )
         self.skills = SkillStore(self.config.skills_dir, namespace=self.config.memory_namespace)
         self.context = ContextStore(self.config.context_file)
+        self.checkpoints = AgentCheckpointStore(self.config.checkpoints_dir)
         self.sessions = SessionStore(self.config.sessions_dir)
         self.active_session = self.sessions.ensure_current()
         self.todos = TodoStore(self.config.todo_file)
@@ -152,6 +158,9 @@ class EvolvaAgent:
             self.config.repo_index_file,
             self._run_dream_tool,
         )
+        self.tool_router = ToolRouter(self.tools, limit=self.config.prompt_tool_limit)
+        self.model_router = ModelRouter(self.config)
+        self.last_selected_tools: list[str] = []
         self.coordinator.attach_tools(self._call_tool, self.tools)
         self.graph_runtime = EvolvaLangGraphRuntime(self)
         self.assume_yes = assume_yes
@@ -206,6 +215,7 @@ class EvolvaAgent:
         self.config = replace(self.config, model=model)
         self.llm = OpenAICompatibleLLM(self.config)
         self.coordinator.llm = self.llm
+        self.model_router = ModelRouter(self.config)
         self.context.add("decision", f"Switched model to {model}", role="system", meta={"model": model})
         return model
 
@@ -243,6 +253,7 @@ class EvolvaAgent:
         self.config = replace(self.config, **updates)
         self.llm = OpenAICompatibleLLM(self.config)
         self.coordinator.llm = self.llm
+        self.model_router = ModelRouter(self.config)
         safe_updates = {key: ("configured" if key == "api_key" and value else value) for key, value in updates.items()}
         self.context.add("decision", "Updated LLM runtime configuration", role="system", meta=safe_updates)
         return self.config
@@ -263,6 +274,8 @@ class EvolvaAgent:
         llm_timeout: int | None = None,
         execution_bounds: AgentExecutionBounds | None = None,
         cancellation_token: CancellationToken | None = None,
+        resume_run_id: str | None = None,
+        event_callback: Any | None = None,
     ) -> TurnResult:
         meta = {
             "runtime": "langgraph",
@@ -272,6 +285,7 @@ class EvolvaAgent:
             "max_steps": self.config.max_steps,
             "images": image_sources or [],
             "session_id": self.active_session.id,
+            "resume_run_id": resume_run_id or "",
         }
         owns_trace = self.tracer.current is None
         if owns_trace:
@@ -293,14 +307,27 @@ class EvolvaAgent:
                 self.tracer.event("agent_chat_end", {"status": "fallback", "answer": result.answer[:4000]})
             return result
 
-        self._auto_route_task(user_message)
-        state = self.graph_runtime.run(
-            user_message,
-            image_sources=image_sources,
-            llm_timeout=llm_timeout,
-            execution_bounds=execution_bounds,
-            cancellation_token=cancellation_token,
-        )
+        if not resume_run_id:
+            self._auto_route_task(user_message)
+        self.last_llm_usage = {}
+        unsubscribe = self.tracer.subscribe(event_callback) if callable(event_callback) else None
+        try:
+            state = self.graph_runtime.run(
+                user_message,
+                image_sources=image_sources,
+                llm_timeout=llm_timeout,
+                execution_bounds=execution_bounds,
+                cancellation_token=cancellation_token,
+                resume_run_id=resume_run_id,
+            )
+        except Exception as exc:
+            self.tracer.event("agent_chat_interrupted", {"error_type": type(exc).__name__, "error": str(exc)[:1000]})
+            if owns_trace:
+                self.tracer.end("Agent run interrupted before completion.", status="interrupted")
+            raise
+        finally:
+            if unsubscribe is not None:
+                unsubscribe()
         final = state.get("final", "")
         failed_tools = state.get("failed_tools", [])
         stopped_by_limit = bool(state.get("stopped_by_limit", False))
@@ -310,7 +337,22 @@ class EvolvaAgent:
             self.tracer.end(final, status=status)
         else:
             self.tracer.event("agent_chat_end", {"status": status, "answer": final[:4000], "failed_tools": failed_tools})
-        return TurnResult(answer=final, tool_logs=state.get("tool_logs", []), failed_tools=failed_tools, stopped_by_limit=stopped_by_limit, cancelled=cancelled)
+        return TurnResult(
+            answer=final,
+            tool_logs=state.get("tool_logs", []),
+            failed_tools=failed_tools,
+            stopped_by_limit=stopped_by_limit,
+            cancelled=cancelled,
+            run_id=str(state.get("run_id", "")),
+            verification=dict(state.get("verification", {})),
+        )
+
+    def resume(self, run_id: str, **kwargs: Any) -> TurnResult:
+        checkpoint = self.checkpoints.load(run_id)
+        if checkpoint.get("status") == "completed":
+            raise ValueError(f"Agent run `{run_id}` is already completed")
+        state = checkpoint["state"]
+        return self.chat(str(state.get("user_message", "")), resume_run_id=run_id, **kwargs)
 
     def _auto_route_task(self, user_message: str) -> None:
         if not getattr(self.config, "multi_agent_auto_route", True):
@@ -324,6 +366,8 @@ class EvolvaAgent:
             user_message,
             roles=route.roles,
             context=f"Automatic task route: {route.label}. Reason: {route.reason}",
+            parallel=True,
+            synthesize=True,
         )
         self.tracer.event("multi_agent_auto_route", {"route": route.to_dict(), "report": report.to_dict()})
         self.context.add(
@@ -335,7 +379,7 @@ class EvolvaAgent:
 
     def graph_nodes(self) -> list[str]:
         """Return the explicit LangGraph node names used by the runtime."""
-        return ["prepare", "llm", "tool", "observe", "persist", "auto_evolve"]
+        return ["prepare", "analyze", "llm", "tool", "observe", "verify", "recover", "persist", "auto_evolve"]
 
     def count_modified_files(self) -> int:
         return len(self.modified_file_paths())
@@ -380,21 +424,54 @@ class EvolvaAgent:
             paths.add(raw_path)
         return paths
 
-    def _messages(self, user_message: str, scratch: str, image_sources: list[str] | None = None) -> list[dict[str, Any]]:
-        context = (
-            f"Relevant memories:\n{self.memory.context(user_message)}\n\n"
-            f"Persistent context:\n{self.context.prompt_context(user_message)}\n\n"
-            f"Active todos:\n{self.todos.context()}\n\n"
-            f"Sandbox:\n{self.sandbox.describe()}\n\n"
-            f"Sub-agent roles:\n{self.coordinator.list_roles()}\n\n"
-            f"Relevant skills:\n{self.skills.context(user_message)}\n\n"
-            f"Available tools:\n{self.tools.describe()}\n\n"
-            f"Tool scratchpad:\n{scratch or 'No tool calls yet.'}"
+    def _messages(
+        self,
+        user_message: str,
+        scratch: str,
+        image_sources: list[str] | None = None,
+        turn_messages: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        scratch = scratch[-max(0, int(self.config.prompt_scratch_max_chars)) :]
+        selection = self.tool_router.select_report(user_message, scratch=scratch) if self.config.tool_router_enabled else None
+        selected_tools = selection.names if selection is not None else self.tools.names()
+        self.last_selected_tools = list(selected_tools)
+        role_context = self.coordinator.list_roles() if {"delegate_agent", "collaborate"} & set(selected_tools) else "Role delegation is not selected for this step."
+        context = bounded_sections(
+            [
+                ("Relevant memories", self.memory.context(user_message), 3),
+                ("Persistent context", self.context.prompt_context(user_message), 3),
+                ("Active todos", self.todos.context(), 2),
+                ("Relevant skills", self.skills.context(user_message), 3),
+                ("Available tools", self.tools.describe(selected_tools), 5),
+                ("Sandbox", self.sandbox.describe(), 1),
+                ("Sub-agent roles", role_context, 1),
+                ("Tool scratchpad", scratch or "No tool calls yet.", 5),
+            ],
+            max_chars=self.config.prompt_context_max_chars,
         )
+        if selection is not None:
+            self.tracer.event(
+                "tool_selection",
+                {"tools": selected_tools, "scores": selection.scores, "reason": selection.reason, "limit": self.config.prompt_tool_limit},
+            )
         messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT + "\n\n" + context}]
-        messages.extend(self.history[-8:])
+        messages.extend(self._bounded_history())
         messages.append({"role": "user", "content": user_content_with_images(user_message, image_sources, root=self.config.root)})
+        messages.extend(turn_messages or [])
         return messages
+
+    def _bounded_history(self) -> list[dict[str, Any]]:
+        remaining = max(0, int(self.config.prompt_history_max_chars))
+        selected: list[dict[str, Any]] = []
+        for message in reversed(self.history[-8:]):
+            if remaining <= 0:
+                break
+            content = str(message.get("content", ""))
+            if len(content) > remaining:
+                content = content[-remaining:]
+            selected.append({"role": message.get("role", "user"), "content": content})
+            remaining -= len(content)
+        return list(reversed(selected))
 
     def _call_tool(self, name: str, args: dict[str, Any]) -> ToolResult:
         try:

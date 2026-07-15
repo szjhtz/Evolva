@@ -167,6 +167,11 @@ def _runtime_paths(env_name: str) -> tuple[Path, ...]:
     return tuple(Path(item).expanduser() for item in raw.split(os.pathsep) if item.strip())
 
 
+def _runtime_csv(env_name: str) -> tuple[str, ...]:
+    raw = os.getenv(env_name, "").strip()
+    return tuple(item.strip() for item in raw.split(",") if item.strip())
+
+
 def mask_secret(value: str | None) -> str:
     """Return a safe display form for secrets."""
 
@@ -197,6 +202,7 @@ class AgentConfig:
     workflows_dir: Path = field(default_factory=lambda: default_runtime_path("workflows"))
     loops_dir: Path = field(default_factory=lambda: default_runtime_path("loops"))
     loop_runs_dir: Path = field(default_factory=lambda: default_runtime_path("loop_runs"))
+    checkpoints_dir: Path = field(default_factory=lambda: default_runtime_path("checkpoints"))
     runtime_config_file: Path = field(default_factory=lambda: default_runtime_path("runtime", "config.json"))
     mcp_config_file: Path = field(default_factory=lambda: default_runtime_path("mcp", "servers.json"))
     mcp_tools_cache_file: Path = field(default_factory=lambda: default_runtime_path("mcp", "tools-cache.json"))
@@ -221,6 +227,11 @@ class AgentConfig:
     policy_file: Path | None = field(default_factory=lambda: Path(os.environ["EVOLVA_POLICY_FILE"]).expanduser() if os.getenv("EVOLVA_POLICY_FILE") else None)
     profile: str = os.getenv("EVOLVA_PROFILE", "dev")
     model: str = field(default_factory=lambda: _runtime_value("model", "OPENAI_MODEL", "gpt-4o-mini") or "gpt-4o-mini")
+    model_fast: str = field(default_factory=lambda: os.getenv("EVOLVA_MODEL_FAST", "").strip())
+    model_coding: str = field(default_factory=lambda: os.getenv("EVOLVA_MODEL_CODING", "").strip())
+    model_reasoning: str = field(default_factory=lambda: os.getenv("EVOLVA_MODEL_REASONING", "").strip())
+    model_fallbacks: tuple[str, ...] = field(default_factory=lambda: _runtime_csv("EVOLVA_MODEL_FALLBACKS"))
+    model_routing_enabled: bool = field(default_factory=lambda: _runtime_bool("EVOLVA_MODEL_ROUTING", True))
     api_key: str | None = field(default_factory=lambda: _runtime_value("api_key", "OPENAI_API_KEY", None))
     base_url: str = field(default_factory=lambda: _runtime_value("base_url", "OPENAI_BASE_URL", "https://api.openai.com/v1") or "https://api.openai.com/v1")
     temperature: float = field(default_factory=lambda: _runtime_float("temperature", "OPENAI_TEMPERATURE", 0.2))
@@ -240,6 +251,14 @@ class AgentConfig:
     multi_agent_tool_steps: int = field(default_factory=lambda: _runtime_int("EVOLVA_MULTI_AGENT_TOOL_STEPS", 2))
     multi_agent_auto_route: bool = field(default_factory=lambda: _runtime_bool("EVOLVA_MULTI_AGENT_AUTO_ROUTE", False))
     multi_agent_auto_route_max_roles: int = field(default_factory=lambda: _runtime_int("EVOLVA_MULTI_AGENT_AUTO_ROUTE_MAX_ROLES", 4))
+    prompt_tool_limit: int = field(default_factory=lambda: _runtime_int("EVOLVA_PROMPT_TOOL_LIMIT", 8))
+    prompt_context_max_chars: int = field(default_factory=lambda: _runtime_int("EVOLVA_PROMPT_CONTEXT_MAX_CHARS", 8_000))
+    prompt_history_max_chars: int = field(default_factory=lambda: _runtime_int("EVOLVA_PROMPT_HISTORY_MAX_CHARS", 12_000))
+    prompt_scratch_max_chars: int = field(default_factory=lambda: _runtime_int("EVOLVA_PROMPT_SCRATCH_MAX_CHARS", 8_000))
+    tool_router_enabled: bool = field(default_factory=lambda: _runtime_bool("EVOLVA_TOOL_ROUTER", True))
+    llm_native_tools: bool = field(default_factory=lambda: _runtime_bool("EVOLVA_LLM_NATIVE_TOOLS", True))
+    agent_max_recovery_attempts: int = field(default_factory=lambda: _runtime_int("EVOLVA_AGENT_MAX_RECOVERY_ATTEMPTS", 2))
+    agent_max_repeated_actions: int = field(default_factory=lambda: _runtime_int("EVOLVA_AGENT_MAX_REPEATED_ACTIONS", 1))
     dream_require_verification: bool = field(default_factory=lambda: _runtime_bool("EVOLVA_DREAM_REQUIRE_VERIFICATION", True))
     max_steps: int = int(os.getenv("EVOLVA_MAX_STEPS", "8"))
     auto_evolve: bool = os.getenv("EVOLVA_AUTO_EVOLVE", "1") != "0"
@@ -266,6 +285,7 @@ class AgentConfig:
         self._relocate_default_path("workflows_dir", "workflows")
         self._relocate_default_path("loops_dir", "loops")
         self._relocate_default_path("loop_runs_dir", "loop_runs")
+        self._relocate_default_path("checkpoints_dir", "checkpoints")
         self._relocate_default_path("runtime_config_file", "runtime", "config.json")
         self._relocate_default_path("mcp_config_file", "mcp", "servers.json")
         self._relocate_default_path("mcp_tools_cache_file", "mcp", "tools-cache.json")
@@ -293,6 +313,7 @@ class AgentConfig:
         self.workflows_dir.mkdir(parents=True, exist_ok=True)
         self.loops_dir.mkdir(parents=True, exist_ok=True)
         self.loop_runs_dir.mkdir(parents=True, exist_ok=True)
+        self.checkpoints_dir.mkdir(parents=True, exist_ok=True)
         self.runtime_config_file.parent.mkdir(parents=True, exist_ok=True)
         self.mcp_config_file.parent.mkdir(parents=True, exist_ok=True)
         self.mcp_tools_cache_file.parent.mkdir(parents=True, exist_ok=True)

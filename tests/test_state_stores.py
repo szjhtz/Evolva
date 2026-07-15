@@ -228,12 +228,52 @@ def test_self_evolution_audit_reports_coverage_and_recommendations(tmp_path):
 
 
 def test_reflect_after_turn_only_for_failures_or_long_answer(tmp_path):
-    engine = SelfEvolutionEngine(MemoryStore(tmp_path / "memory.jsonl"), SkillStore(tmp_path / "skills"))
+    memory = MemoryStore(tmp_path / "memory.jsonl")
+    skills = SkillStore(tmp_path / "skills")
+    engine = SelfEvolutionEngine(memory, skills)
     assert engine.reflect_after_turn("task", "short", []) is None
     tool_report = engine.reflect_after_turn("task", "short", ["shell"])
     assert tool_report is not None and tool_report.trigger == "tool_failure"
+    assert tool_report.asset_status == "candidate"
+    assert "Tool failures" not in memory.context("Tool failures")
+    candidate_skill = next(skill for skill in skills.list() if skill.name == tool_report.skill_name)
+    assert candidate_skill.metadata["status"] == "candidate"
     long_report = engine.reflect_after_turn("task", "x" * 4001, [])
     assert long_report is not None and long_report.trigger == "quality_signal"
+
+
+def test_evolution_candidate_requires_independent_evidence_and_regression_before_promotion(tmp_path):
+    memory = MemoryStore(tmp_path / "memory.jsonl")
+    skills = SkillStore(tmp_path / "skills")
+    engine = SelfEvolutionEngine(memory, skills)
+    report = engine.evolve(
+        "Retry timed out repository searches with a narrower query",
+        trigger="tool_failure",
+        category="tool_failure",
+        evidence=["trace:run_1"],
+    )
+
+    assert report.asset_status == "candidate"
+    rejected = engine.promote_fingerprint(
+        report.fingerprint,
+        evidence=["trace:run_1"],
+        regression_passed=True,
+    )
+    assert not rejected["promoted"]
+    assert "independent" in rejected["reason"]
+
+    promoted = engine.promote_fingerprint(
+        report.fingerprint,
+        evidence=["trace:run_1", "eval:timeout_recovery"],
+        regression_passed=True,
+    )
+    assert promoted["promoted"]
+    assert promoted["memories"]
+    assert promoted["skills"] == [report.skill_name]
+    assert "narrower query" in memory.context("repository searches")
+    promoted_skill = next(skill for skill in skills.list() if skill.name == report.skill_name)
+    assert promoted_skill.metadata["status"] == "active"
+    assert promoted_skill.metadata["verified"] == "true"
 
 
 def test_trace_evolution_analyzer_generates_and_applies_proposals(tmp_path):

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from evolva.agent.redaction import Redactor
+from evolva.agent.relevance import relevance_score
 from evolva.storage import atomic_update_json, atomic_write_json, read_json
 
 ContextKind = Literal["message", "note", "artifact", "summary", "decision"]
@@ -64,12 +65,10 @@ class ContextStore:
         q = query.lower().strip()
         if not q:
             return self.recent(limit)
-        scored: list[tuple[int, ContextItem]] = []
+        scored: list[tuple[float, ContextItem]] = []
         for item in self._load():
             hay = f"{item.kind} {item.role} {item.content} {json.dumps(item.meta or {}, ensure_ascii=False)}".lower()
-            score = sum(1 for token in q.split() if token in hay)
-            if q in hay:
-                score += 3
+            score = relevance_score(q, hay)
             if score:
                 scored.append((score, item))
         scored.sort(key=lambda x: (x[0], x[1].ts), reverse=True)

@@ -66,6 +66,7 @@ Inside the TUI, run `/config wizard` to connect any OpenAI-compatible model. Wit
 Review this repository     Start a task
 /trace list                Inspect execution records
 /session list              List persisted sessions
+/resume                    List and continue interrupted agent runs
 /cancel                    Stop the active task, or press Ctrl+K
 ```
 
@@ -78,9 +79,9 @@ Runtime state lives under `.evolva/`, separate from source code. Set `EVOLVA_RUN
 | Use case | What Evolva provides | Entry |
 | --- | --- | --- |
 | Understand a repository | File, symbol, reference, and pluggable semantic retrieval | `/repo` |
-| Execute work | Files, Shell, Python, Web, and MCP tools under policy and approval | Chat / `/run` |
+| Execute work | Dynamic tool selection, native tool calls, conflict-aware patches, diffs, and tests | Chat / `/run` |
 | Run complex processes | Recoverable workflows and quality-gated loops | `/workflow` / `/loop` |
-| Coordinate roles | Task Router, bounded sub-agents, parallel roles, and synthesis | `/agents` |
+| Coordinate roles | Task Router, dependency DAGs, bounded sub-agents, conflict detection, and synthesis | `/agents` |
 | Review and regress | Trace, artifact manifests, replay, and JSONL evals | `/trace` / `evolva eval` |
 | Retain experience | Namespaced Memory and Skills with TTL, conflicts, and verification | `/memory` / `/dream` |
 
@@ -92,9 +93,11 @@ Runtime state lives under `.evolva/`, separate from source code. Set `EVOLVA_RUN
 
 The runtime has three main lanes:
 
-1. **Reasoning & State**: TUI, Core, Session, Context, and Repo Index organize task context.
+1. **Reasoning & State**: TUI, Core, Session, Context, and Repo Index organize task context by relevance and budget.
 2. **Guarded Execution**: calls pass through policy, approval, and sandbox controls; production command execution requires strong isolation.
-3. **Evidence & Learning**: Trace and Eval prove behavior; Dream promotes only candidates that pass a verifier.
+3. **Evidence & Learning**: the main loop checks readback, diff, or test evidence before completion; bounded recovery handles failures, checkpoints resume interrupted runs, and only verified experience is promoted.
+
+Optional model tiers provide ordered failover through `EVOLVA_MODEL_FAST`, `EVOLVA_MODEL_CODING`, `EVOLVA_MODEL_REASONING`, and comma-separated `EVOLVA_MODEL_FALLBACKS`. With no tier configured, Evolva continues to use `OPENAI_MODEL`.
 
 ## Loop Engineering
 
@@ -259,6 +262,7 @@ See [Production Operations](docs/production-operations.md), [State Migrations](d
 /config wizard                  Configure a model
 /session list|new|use|rename    Manage sessions
 /session fork|retry             Branch or retry the latest turn
+/resume [run_id|latest]         List or continue interrupted agent runs
 /cancel                         Stop the active task
 /repo build|status|search       Manage the repository index
 /trace list|show|context        Inspect execution evidence
@@ -294,7 +298,7 @@ uv run coverage report
 uv build
 ```
 
-CI also runs the `smoke`, `repo_index`, `security`, `scorers`, and `trace_artifacts` eval baselines.
+CI also runs the `smoke`, `repo_index`, `security`, `scorers`, `trace_artifacts`, and 43-case `agent_quality` eval baselines.
 
 ## Project Governance
 

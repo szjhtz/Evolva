@@ -41,3 +41,5 @@ jobs:
         run: python -m evolva.cli eval evals/tasks/scorers.jsonl --yes --baseline evals/baselines/scorers.json --min-score 1.0 --no-regression
       - name: Eval gate - trace artifacts
         run: python -m evolva.cli eval evals/tasks/trace_artifacts.jsonl --yes --baseline evals/baselines/trace_artifacts.json --min-score 1.0 --no-regression
+      - name: Eval gate - agent quality
+        run: python -m evolva.cli eval evals/tasks/agent_quality.jsonl --yes --baseline evals/baselines/agent_quality.json --min-score 1.0 --no-regression

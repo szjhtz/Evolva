@@ -7,11 +7,14 @@ import hashlib
 import time
 import os
 import importlib
+import fnmatch
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Iterable, Protocol
+
+from evolva.agent.relevance import text_tokens
 
 
 @dataclass
@@ -113,44 +116,7 @@ class RepoIndex:
         "dist",
         "build",
     }
-    GENERATED_PARTS = {
-        ".evolva",
-        "artifacts",
-        "context",
-        "dreams",
-        "eval_results",
-        "loop_runs",
-        "loops",
-        "mcp",
-        "memory",
-        "metrics",
-        "policy",
-        "repo_index",
-        "runtime",
-        "skills",
-        "todo",
-        "traces",
-        "workflows",
-        "workspace",
-        "evolva/repo_index",
-        "evolva/artifacts",
-        "evolva/context",
-        "evolva/dreams",
-        "evolva/traces",
-        "evolva/eval_results",
-        "evolva/loop_runs",
-        "evolva/loops",
-        "evolva/mcp",
-        "evolva/memory",
-        "evolva/metrics",
-        "evolva/policy",
-        "evolva/runtime",
-        "evolva/skills",
-        "evolva/todo",
-        "evolva/workflows",
-        "evolva/workspace",
-        "evolva/optimization_reports",
-    }
+    GENERATED_PARTS = {".evolva"}
     EXTENSIONS = {
         ".py": "python",
         ".md": "markdown",
@@ -160,11 +126,46 @@ class RepoIndex:
         ".yaml": "yaml",
         ".yml": "yaml",
         ".txt": "text",
+        ".js": "javascript",
+        ".jsx": "javascript",
+        ".ts": "typescript",
+        ".tsx": "typescript",
+        ".go": "go",
+        ".rs": "rust",
+        ".java": "java",
+        ".kt": "kotlin",
+        ".kts": "kotlin",
+        ".c": "c",
+        ".h": "c",
+        ".cc": "cpp",
+        ".cpp": "cpp",
+        ".hpp": "cpp",
+        ".cs": "csharp",
+        ".rb": "ruby",
+        ".php": "php",
+        ".swift": "swift",
+        ".sh": "shell",
+        ".bash": "shell",
+        ".zsh": "shell",
+        ".sql": "sql",
+        ".html": "html",
+        ".css": "css",
+        ".vue": "vue",
+        ".svelte": "svelte",
     }
-    TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{1,}|[A-Z]?[a-z]+|[0-9]+")
+    TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{1,}|[A-Z]?[a-z]+|[0-9]+|[\u4e00-\u9fff]+")
     PY_SYMBOL_RE = re.compile(r"^(?P<indent>\s*)(?P<kind>class|def|async\s+def)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)", re.MULTILINE)
     IMPORT_RE = re.compile(r"^\s*(?:from\s+([A-Za-z0-9_\.]+)\s+import\s+(.+)|import\s+(.+))", re.MULTILINE)
     MD_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
+    GENERIC_SYMBOL_PATTERNS = {
+        "javascript": re.compile(r"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?(?P<kind>class|function|interface|type|enum)\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)", re.MULTILINE),
+        "typescript": re.compile(r"^\s*(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:async\s+)?(?P<kind>class|function|interface|type|enum|namespace)\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)", re.MULTILINE),
+        "go": re.compile(r"^\s*(?P<kind>type|func)\s+(?:\([^)]*\)\s*)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)", re.MULTILINE),
+        "rust": re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?P<kind>fn|struct|enum|trait|type|mod)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)", re.MULTILINE),
+        "java": re.compile(r"^\s*(?:public|protected|private|abstract|final|static|sealed|non-sealed|\s)*\s*(?P<kind>class|interface|enum|record)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)", re.MULTILINE),
+        "kotlin": re.compile(r"^\s*(?:public|private|protected|internal|open|data|sealed|abstract|\s)*\s*(?P<kind>class|interface|object|fun|typealias)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)", re.MULTILINE),
+        "csharp": re.compile(r"^\s*(?:public|private|protected|internal|static|abstract|sealed|partial|\s)*\s*(?P<kind>class|interface|enum|record|struct)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)", re.MULTILINE),
+    }
 
     def __init__(
         self,
@@ -178,6 +179,8 @@ class RepoIndex:
         self.index_file = (index_file or self.root / "evolva" / "repo_index" / "index.json").resolve()
         self.max_file_bytes = max_file_bytes
         self.embedding_provider = embedding_provider or load_embedding_provider()
+        self.gitignore_rules = self._load_gitignore_rules()
+        self.runtime_generated_parts = self._runtime_generated_parts()
 
     def build(self, *, max_files: int = 1000, incremental: bool = True) -> RepoIndexSnapshot:
         """Build and persist a repository index snapshot."""
@@ -374,7 +377,9 @@ class RepoIndex:
         parts = set(Path(rel).parts)
         if parts & self.IGNORE_DIRS:
             return True
-        return any(rel == item or rel.startswith(item + "/") for item in self.GENERATED_PARTS)
+        if any(rel == item or rel.startswith(item + "/") for item in self.GENERATED_PARTS | self.runtime_generated_parts):
+            return True
+        return self._matches_gitignore(rel)
 
     def _read_text(self, path: Path) -> str | None:
         try:
@@ -403,7 +408,34 @@ class RepoIndex:
             return self._chunk_python(rel, text)
         if language == "markdown":
             return self._chunk_markdown(rel, text)
+        if language in self.GENERIC_SYMBOL_PATTERNS:
+            return self._chunk_generic_symbols(rel, text, language)
         return [self._file_chunk(rel, text, language)]
+
+    def _chunk_generic_symbols(self, rel: str, text: str, language: str) -> list[CodeChunk]:
+        lines = text.splitlines()
+        matches = list(self.GENERIC_SYMBOL_PATTERNS[language].finditer(text))
+        if not matches:
+            return [self._file_chunk(rel, text, language)]
+        line_starts = self._line_offsets(text)
+        chunks: list[CodeChunk] = []
+        for index, match in enumerate(matches):
+            start = self._line_for_offset(line_starts, match.start())
+            end = len(lines) if index + 1 >= len(matches) else self._line_for_offset(line_starts, matches[index + 1].start()) - 1
+            chunk_text = "\n".join(lines[start - 1 : end]).strip("\n")
+            chunks.append(
+                CodeChunk(
+                    path=rel,
+                    language=language,
+                    symbol=match.group("name"),
+                    kind=match.group("kind"),
+                    start_line=start,
+                    end_line=end,
+                    text=chunk_text,
+                    references=self._identifier_refs(chunk_text)[:80],
+                )
+            )
+        return chunks
 
     def _chunk_python(self, rel: str, text: str) -> list[CodeChunk]:
         lines = text.splitlines()
@@ -526,10 +558,7 @@ class RepoIndex:
         return dot / max(1e-9, left_norm * right_norm)
 
     def _token_counts(self, text: str) -> Counter[str]:
-        tokens: list[str] = []
-        for raw in self.TOKEN_RE.findall(text):
-            tokens.extend(self._split_identifier(raw))
-        return Counter(token for token in tokens if len(token) > 1)
+        return Counter(token for token in text_tokens(text) if len(token) > 1)
 
     def _split_identifier(self, value: str) -> list[str]:
         pieces = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", value).replace("_", " ").replace("-", " ").split()
@@ -564,6 +593,87 @@ class RepoIndex:
             seen.add(token)
             refs.append(token)
         return refs
+
+    def _load_gitignore_rules(self) -> list[tuple[str, str, bool, bool]]:
+        rules: list[tuple[str, str, bool, bool]] = []
+        for ignore_file in sorted(self.root.rglob(".gitignore")):
+            try:
+                rel_file = ignore_file.resolve().relative_to(self.root)
+            except ValueError:
+                continue
+            if set(rel_file.parts) & self.IGNORE_DIRS:
+                continue
+            base = rel_file.parent.as_posix()
+            base = "" if base == "." else base
+            try:
+                lines = ignore_file.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                continue
+            for raw in lines:
+                pattern = raw.strip()
+                if not pattern or pattern.startswith("#"):
+                    continue
+                negated = pattern.startswith("!")
+                if negated:
+                    pattern = pattern[1:]
+                directory_only = pattern.endswith("/")
+                pattern = pattern.strip("/")
+                if pattern:
+                    rules.append((base, pattern, negated, directory_only))
+        return rules
+
+    def _runtime_generated_parts(self) -> set[str]:
+        try:
+            parent = self.index_file.parent
+            if parent.name != "repo_index":
+                return set()
+            runtime_home = parent.parent.relative_to(self.root).as_posix()
+        except ValueError:
+            return set()
+        if runtime_home in {"", "."}:
+            return set()
+        if runtime_home == ".evolva":
+            return {runtime_home}
+        names = {
+            "artifacts",
+            "context",
+            "dreams",
+            "eval_results",
+            "loop_runs",
+            "loops",
+            "mcp",
+            "memory",
+            "metrics",
+            "policy",
+            "repo_index",
+            "runtime",
+            "sessions",
+            "skills",
+            "todo",
+            "traces",
+            "workflows",
+            "workspace",
+        }
+        return {f"{runtime_home}/{name}" for name in names}
+
+    def _matches_gitignore(self, rel: str) -> bool:
+        ignored = False
+        for base, pattern, negated, directory_only in self.gitignore_rules:
+            if base:
+                if rel != base and not rel.startswith(base + "/"):
+                    continue
+                local = rel[len(base) :].lstrip("/")
+            else:
+                local = rel
+            if directory_only:
+                matched = local == pattern or local.startswith(pattern + "/") or f"/{pattern}/" in f"/{local}/"
+            elif "/" in pattern:
+                matched = fnmatch.fnmatch(local, pattern)
+            else:
+                matched = any(fnmatch.fnmatch(part, pattern) for part in Path(local).parts)
+            if matched:
+                ignored = not negated
+        return ignored
 
     def _write(self, snapshot: RepoIndexSnapshot) -> None:
         self.index_file.parent.mkdir(parents=True, exist_ok=True)

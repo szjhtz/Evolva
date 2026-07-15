@@ -6,7 +6,7 @@ import uuid
 import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from evolva.agent.observability import ObservabilitySink
 from evolva.agent.redaction import Redactor
@@ -61,7 +61,19 @@ class TraceRecorder:
         self.current: TraceRun | None = None
         self._event_seq = 0
         self._lock = threading.RLock()
+        self._listeners: list[Callable[[dict[str, Any]], None]] = []
         self.traces_dir.mkdir(parents=True, exist_ok=True)
+
+    def subscribe(self, callback: Callable[[dict[str, Any]], None]) -> Callable[[], None]:
+        with self._lock:
+            self._listeners.append(callback)
+
+        def unsubscribe() -> None:
+            with self._lock:
+                if callback in self._listeners:
+                    self._listeners.remove(callback)
+
+        return unsubscribe
 
     @property
     def current_run_id(self) -> str:
@@ -111,6 +123,11 @@ class TraceRecorder:
             )
             self.current.events.append(event)
         self._record_observability(event)
+        for listener in list(self._listeners):
+            try:
+                listener(event.to_dict())
+            except Exception:
+                continue
         return event_id
 
     def end(self, final_answer: str, *, status: str = "completed") -> Path | None:

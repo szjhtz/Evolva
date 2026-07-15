@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import fnmatch
+import hashlib
 import json
 from pathlib import Path
 from dataclasses import asdict
@@ -18,6 +20,9 @@ from evolva.agent.skills import SkillStore
 from evolva.agent.todo import TodoStore
 from evolva.tools.base import Tool, ToolRegistry, ToolResult
 from evolva.tools import taskset as taskset_tools
+
+
+SEARCH_SKIP_DIRS = {".git", ".evolva", ".venv", "venv", "node_modules", "__pycache__", "dist", "build"}
 
 
 def build_registry(
@@ -56,6 +61,58 @@ def build_registry(
         context.add("artifact", f"Read file {p.relative_to(sandbox.root)}", meta={"path": str(p)})
         return ToolResult(True, text, {"path": str(p), "truncated": len(text) >= max_chars})
 
+    def read_file_range(path: str, start_line: int = 1, end_line: int = 200, max_chars: int = 20000) -> ToolResult:
+        p = sandbox.resolve(path)
+        if not p.exists() or not p.is_file():
+            return ToolResult(False, f"File not found: {p}")
+        start = max(1, int(start_line))
+        end = max(start, int(end_line))
+        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+        selected = [f"{number}: {lines[number - 1]}" for number in range(start, min(end, len(lines)) + 1)]
+        output = "\n".join(selected)
+        truncated = len(output) > max_chars
+        output = output[: max(0, int(max_chars))]
+        rel = p.relative_to(sandbox.root).as_posix()
+        context.add("artifact", f"Read lines {start}-{end} from {rel}", meta={"path": str(p), "start_line": start, "end_line": end})
+        return ToolResult(True, output, {"path": str(p), "start_line": start, "end_line": min(end, len(lines)), "truncated": truncated})
+
+    def search_text(query: str, path: str = ".", glob: str = "*", max_results: int = 100, case_sensitive: bool = False) -> ToolResult:
+        root = sandbox.resolve(path)
+        if not root.exists():
+            return ToolResult(False, f"Not found: {root}")
+        needle = query if case_sensitive else query.lower()
+        if not needle:
+            return ToolResult(False, "Search query is required")
+        candidates = [root] if root.is_file() else root.rglob("*")
+        matches: list[str] = []
+        skipped_binary = 0
+        for candidate in candidates:
+            if not candidate.is_file() or any(part in SEARCH_SKIP_DIRS for part in candidate.relative_to(sandbox.root).parts):
+                continue
+            rel = candidate.relative_to(sandbox.root).as_posix()
+            if glob and glob != "*" and not fnmatch.fnmatch(candidate.name, glob) and not fnmatch.fnmatch(rel, glob):
+                continue
+            try:
+                if candidate.stat().st_size > 1_000_000:
+                    continue
+                raw = candidate.read_bytes()
+                if b"\x00" in raw[:4096]:
+                    skipped_binary += 1
+                    continue
+                text = raw.decode("utf-8", errors="replace")
+            except OSError:
+                continue
+            for line_number, line in enumerate(text.splitlines(), start=1):
+                hay = line if case_sensitive else line.lower()
+                if needle in hay:
+                    matches.append(f"{rel}:{line_number}:{line[:500]}")
+                    if len(matches) >= max(1, int(max_results)):
+                        break
+            if len(matches) >= max(1, int(max_results)):
+                break
+        output = "\n".join(matches) or "No matches."
+        return ToolResult(True, output, {"query": query, "path": str(root), "matches": len(matches), "skipped_binary": skipped_binary, "truncated": len(matches) >= max_results})
+
     def write_file(path: str, content: str, append: bool = False) -> ToolResult:
         try:
             p = sandbox.resolve_write(path)
@@ -83,6 +140,36 @@ def build_registry(
             },
         )
 
+    def apply_patch(path: str, old_text: str, new_text: str, expected_sha256: str = "", replace_all: bool = False) -> ToolResult:
+        try:
+            p = sandbox.resolve(path)
+        except ValueError as exc:
+            return ToolResult(False, str(exc), {"path": path})
+        if not p.exists() or not p.is_file():
+            return ToolResult(False, f"File not found: {p}", {"path": path})
+        raw = p.read_bytes()
+        digest = hashlib.sha256(raw).hexdigest()
+        if expected_sha256 and digest != expected_sha256.strip().lower():
+            return ToolResult(False, f"Patch hash mismatch for {path}: expected {expected_sha256}, current {digest}", {"path": path, "sha256": digest})
+        content = raw.decode("utf-8", errors="strict")
+        if not old_text:
+            return ToolResult(False, "Patch old_text is required", {"path": path, "sha256": digest})
+        matches = content.count(old_text)
+        if matches == 0:
+            return ToolResult(False, f"Patch preimage was not found in {path}", {"path": path, "sha256": digest})
+        if matches > 1 and not replace_all:
+            return ToolResult(False, f"Patch preimage is ambiguous in {path}: {matches} matches", {"path": path, "sha256": digest, "matches": matches})
+        updated = content.replace(old_text, new_text, -1 if replace_all else 1)
+        p.write_text(updated, encoding="utf-8")
+        new_digest = hashlib.sha256(p.read_bytes()).hexdigest()
+        rel = p.relative_to(sandbox.root).as_posix()
+        context.add("artifact", f"Patched file {rel}", meta={"path": str(p), "matches": matches, "sha256": new_digest})
+        return ToolResult(
+            True,
+            f"Patched {rel}: replacements={matches if replace_all else 1} sha256={new_digest}",
+            {"artifact": {"path": rel, "absolute_path": str(p), "kind": "file", "sha256": new_digest, "operation": "patch"}, "previous_sha256": digest},
+        )
+
     def shell(command: str, cwd: str = ".", timeout: int = 30) -> ToolResult:
         result = sandbox.run_shell(command, cwd=cwd, timeout=timeout)
         context.add("artifact", f"Shell `{command}` ok={result.ok}\n{result.output[:1000]}", meta={"cwd": cwd})
@@ -92,6 +179,25 @@ def build_registry(
         result = sandbox.run_python(code, timeout=timeout)
         context.add("artifact", f"Python exec ok={result.ok}\n{result.output[:1000]}")
         return result
+
+    def git_diff(path: str = "", staged: bool = False, max_chars: int = 20000) -> ToolResult:
+        command = "git diff --cached" if staged else "git diff"
+        if path.strip():
+            if any(token in path for token in (";", "|", "`", "$", ">", "<")):
+                return ToolResult(False, "Invalid git diff path")
+            command += f" -- {path.strip()}"
+        result = sandbox.run_shell(command, cwd=".", timeout=30)
+        output = result.output[: max(0, int(max_chars))]
+        data = dict(result.data) if isinstance(result.data, dict) else {}
+        data.update({"path": path, "staged": staged, "truncated": len(result.output) > max_chars})
+        return ToolResult(result.ok, output, data)
+
+    def run_tests(command: str = "python -m pytest -q", cwd: str = ".", timeout: int = 300) -> ToolResult:
+        result = sandbox.run_shell(command, cwd=cwd, timeout=max(1, int(timeout)))
+        data = dict(result.data) if isinstance(result.data, dict) else {}
+        data.update({"command": command, "cwd": cwd, "verification": True})
+        status = "passed" if result.ok else "failed"
+        return ToolResult(result.ok, f"Tests {status}: {command}\n{result.output}".strip(), data)
 
     def web_search(query: str, max_results: int = 5) -> ToolResult:
         result = taskset_tools.web_search_pro(query, provider="auto", max_results=max_results)
@@ -517,7 +623,7 @@ def build_registry(
             report = coordinator.collaborate_report(task, roles=roles, context=context_text)
         output = report.render()
         context.add("note", f"Multi-agent collaboration for `{task}`:\n{output}")
-        return ToolResult(report.status in {"completed", "completed_with_fallbacks"}, output, {"multi_agent": report.to_dict()})
+        return ToolResult(report.status in {"completed", "completed_with_fallbacks", "completed_with_conflicts"}, output, {"multi_agent": report.to_dict()})
 
     def dream_report(limit: int = 20, apply: bool = False, verify: bool = False) -> ToolResult:
         if dream_runner is None:
@@ -527,9 +633,14 @@ def build_registry(
 
     reg.register(Tool("list_files", "List files under the sandbox root", {"path": "str", "max_entries": "int"}, list_files, capabilities=caps("list_files")))
     reg.register(Tool("read_file", "Read a UTF-8 text file under the sandbox root", {"path": "str", "max_chars": "int"}, read_file, capabilities=caps("read_file")))
+    reg.register(Tool("read_file_range", "Read a numbered line range from a UTF-8 file", {"path": "str", "start_line": "int", "end_line": "int", "max_chars": "int"}, read_file_range, capabilities=caps("read_file_range")))
+    reg.register(Tool("search_text", "Search bounded text matches recursively under a path", {"query": "str", "path": "str", "glob": "str", "max_results": "int", "case_sensitive": "bool"}, search_text, capabilities=caps("search_text")))
     reg.register(Tool("write_file", "Write or append a UTF-8 text file under the sandbox root", {"path": "str", "content": "str", "append": "bool"}, write_file, capabilities=caps("write_file")))
+    reg.register(Tool("apply_patch", "Replace an exact existing-file preimage with optional SHA-256 conflict detection", {"path": "str", "old_text": "str", "new_text": "str", "expected_sha256": "str", "replace_all": "bool"}, apply_patch, needs_confirmation=True, capabilities=caps("apply_patch")))
     reg.register(Tool("shell", "Run a shell command inside the sandbox", {"command": "str", "cwd": "str", "timeout": "int"}, shell, needs_confirmation=True, capabilities=caps("shell")))
     reg.register(Tool("python_exec", "Run a short Python snippet in a sandboxed subprocess", {"code": "str", "timeout": "int"}, python_exec, needs_confirmation=True, capabilities=caps("python_exec")))
+    reg.register(Tool("git_diff", "Inspect bounded unstaged or staged Git changes", {"path": "str", "staged": "bool", "max_chars": "int"}, git_diff, needs_confirmation=True, capabilities=caps("git_diff")))
+    reg.register(Tool("run_tests", "Run a project test command and return verification evidence", {"command": "str", "cwd": "str", "timeout": "int"}, run_tests, needs_confirmation=True, capabilities=caps("run_tests")))
     reg.register(Tool("web_search", "Search the web with configured APIs and DuckDuckGo HTML fallback", {"query": "str", "max_results": "int"}, web_search, capabilities=caps("web_search")))
     reg.register(Tool("web_search_pro", "Search the web using provider=auto|tavily|brave|serpapi|duckduckgo", {"query": "str", "provider": "str", "max_results": "int", "timeout": "int"}, web_search_pro, capabilities=caps("web_search_pro")))
     reg.register(Tool("web_fetch", "Fetch a static HTTP(S) page and return plain text when possible", {"url": "str", "max_chars": "int", "timeout": "int"}, web_fetch, capabilities=caps("web_fetch")))

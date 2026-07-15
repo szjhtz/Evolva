@@ -58,6 +58,54 @@ def test_llm_chat_posts_openai_compatible_payload(monkeypatch, temp_config):
     assert captured["timeout"] == cfg.request_timeout
 
 
+def test_llm_normalizes_native_tool_calls(monkeypatch, temp_config):
+    cfg = temp_config.__class__(**{**temp_config.__dict__, "api_key": "sk-test"})
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self, *args):
+            return json.dumps(
+                {
+                    "choices": [
+                        {
+                            "finish_reason": "tool_calls",
+                            "message": {
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": "call_read",
+                                        "type": "function",
+                                        "function": {"name": "read_file", "arguments": '{"path":"README.md"}'},
+                                    }
+                                ],
+                            },
+                        }
+                    ]
+                }
+            ).encode()
+
+    def fake_urlopen(req, timeout):
+        captured["payload"] = json.loads(req.data.decode())
+        return FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    tools = [{"type": "function", "function": {"name": "read_file", "description": "read", "parameters": {"type": "object"}}}]
+
+    response = OpenAICompatibleLLM(cfg).chat([{"role": "user", "content": "read"}], tools=tools, tool_choice="auto")
+
+    assert response.content == ""
+    assert response.tool_calls[0].id == "call_read"
+    assert response.tool_calls[0].arguments == {"path": "README.md"}
+    assert captured["payload"]["tools"] == tools
+    assert captured["payload"]["tool_choice"] == "auto"
+
+
 def test_llm_chat_accepts_per_request_timeout(monkeypatch, temp_config):
     cfg = temp_config.__class__(**{**temp_config.__dict__, "api_key": "sk-test"})
     captured = {}
@@ -80,6 +128,30 @@ def test_llm_chat_accepts_per_request_timeout(monkeypatch, temp_config):
     OpenAICompatibleLLM(cfg).chat([{"role": "user", "content": "hi"}], timeout=420)
 
     assert captured["timeout"] == 420
+
+
+def test_llm_chat_accepts_per_request_model(monkeypatch, temp_config):
+    cfg = temp_config.__class__(**{**temp_config.__dict__, "api_key": "sk-test", "model": "default-model"})
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": "hello"}}]}).encode()
+
+    def fake_urlopen(req, timeout):
+        captured["payload"] = json.loads(req.data.decode())
+        return FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    OpenAICompatibleLLM(cfg).chat([{"role": "user", "content": "hi"}], model="coding-model")
+
+    assert captured["payload"]["model"] == "coding-model"
 
 
 def test_llm_chat_uses_configured_default_temperature(monkeypatch, temp_config):

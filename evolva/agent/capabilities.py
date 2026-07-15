@@ -28,7 +28,12 @@ class Capability(str, Enum):
 DEFAULT_TOOL_CAPABILITIES: dict[str, list[Capability]] = {
     "list_files": [Capability.READ_FILE],
     "read_file": [Capability.READ_FILE],
+    "read_file_range": [Capability.READ_FILE],
+    "search_text": [Capability.READ_FILE],
     "write_file": [Capability.WRITE_FILE],
+    "apply_patch": [Capability.READ_FILE, Capability.WRITE_FILE],
+    "git_diff": [Capability.READ_FILE, Capability.RUN_COMMAND],
+    "run_tests": [Capability.RUN_COMMAND],
     "shell": [Capability.RUN_COMMAND],
     "python_exec": [Capability.RUN_PYTHON],
     "web_search": [Capability.NETWORK],

@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from evolva.agent.core import EvolvaAgent, SYSTEM_PROMPT
-from evolva.agent.llm import LLMResponse
+from evolva.agent.llm import LLMResponse, LLMToolCall
 from evolva.agent.mcp import MCPClient, MCPManager, MCPServerConfig, render_mcp_result
 from evolva.agent.mcp_presets import get_mcp_preset, list_mcp_presets, parse_env_pairs
 from evolva.agent.tracing import TraceRecorder
@@ -55,6 +55,7 @@ def test_agent_uses_langgraph_runtime_for_llm_tool_loop(temp_config):
     agent = EvolvaAgent(temp_config, assume_yes=True)
     responses = iter([
         {"thought": "write file", "tool": {"name": "write_file", "args": {"path": "evolva/workspace/langgraph.txt", "content": "ok"}}, "final": None},
+        {"thought": "verify file", "tool": {"name": "read_file", "args": {"path": "evolva/workspace/langgraph.txt"}}, "final": None},
         {"thought": "done", "tool": None, "final": "LangGraph completed"},
     ])
 
@@ -77,7 +78,182 @@ def test_agent_uses_langgraph_runtime_for_llm_tool_loop(temp_config):
     meta_events = [event for event in trace["events"] if event["kind"] == "run_meta"]
     assert meta_events[-1]["data"]["runtime"] == "langgraph"
     assert meta_events[-1]["data"]["graph_nodes"] == agent.graph_nodes()
-    assert {event["data"].get("node") for event in trace["events"] if event["kind"] == "langgraph_node"} >= {"prepare", "llm", "tool", "observe", "persist", "auto_evolve"}
+    assert result.verification["passed"] is True
+    assert {event["data"].get("node") for event in trace["events"] if event["kind"] == "langgraph_node"} >= {
+        "prepare",
+        "analyze",
+        "llm",
+        "tool",
+        "observe",
+        "verify",
+        "persist",
+        "auto_evolve",
+    }
+
+
+def test_agent_verifier_recovers_when_mutation_has_no_evidence(temp_config):
+    agent = EvolvaAgent(temp_config, assume_yes=True)
+    responses = iter(
+        [
+            {"tool": {"name": "write_file", "args": {"path": "evolva/workspace/recover.txt", "content": "ok"}}, "final": None},
+            {"tool": None, "final": "done too early"},
+            {"tool": {"name": "read_file", "args": {"path": "evolva/workspace/recover.txt"}}, "final": None},
+            {"tool": None, "final": "verified done"},
+        ]
+    )
+
+    class RecoveringLLM:
+        available = True
+
+        def chat(self, messages, **kwargs):
+            return LLMResponse(content=json.dumps(next(responses)))
+
+    agent.llm = RecoveringLLM()
+    result = agent.chat("create and verify a text file")
+
+    assert result.answer == "verified done"
+    assert result.verification["passed"] is True
+    trace = agent.tracer.load(result.run_id)
+    assert "recover" in [event["data"].get("node") for event in trace["events"] if event["kind"] == "langgraph_node"]
+
+
+def test_agent_blocks_repeated_identical_tool_actions(temp_config):
+    agent = EvolvaAgent(replace(temp_config, agent_max_recovery_attempts=0), assume_yes=True)
+    repeated = {"tool": {"name": "write_file", "args": {"path": "evolva/workspace/repeated.txt", "content": "once"}}, "final": None}
+    responses = iter([repeated, repeated, {"tool": None, "final": "done"}])
+
+    class RepeatingLLM:
+        available = True
+
+        def chat(self, messages, **kwargs):
+            return LLMResponse(content=json.dumps(next(responses)))
+
+    agent.llm = RepeatingLLM()
+    result = agent.chat("write once")
+
+    assert "Verification incomplete" in result.answer
+    assert any("Repeated tool action blocked" in log for log in result.tool_logs)
+    assert (temp_config.workspace / "repeated.txt").read_text(encoding="utf-8") == "once"
+
+
+def test_agent_resumes_from_checkpoint_without_repeating_completed_tools(temp_config):
+    first = EvolvaAgent(temp_config, assume_yes=True)
+    responses = iter(
+        [
+            LLMResponse(content=json.dumps({"tool": {"name": "write_file", "args": {"path": "evolva/workspace/resume-agent.txt", "content": "checkpoint"}}, "final": None})),
+            LLMResponse(content=json.dumps({"tool": {"name": "read_file", "args": {"path": "evolva/workspace/resume-agent.txt"}}, "final": None})),
+        ]
+    )
+
+    class InterruptingLLM:
+        available = True
+
+        def chat(self, messages, **kwargs):
+            try:
+                return next(responses)
+            except StopIteration:
+                raise RuntimeError("provider interrupted")
+
+    first.llm = InterruptingLLM()
+    with pytest.raises(RuntimeError, match="provider interrupted"):
+        first.chat("create a resumable artifact")
+
+    checkpoint = first.checkpoints.list(limit=1)[0]
+    assert checkpoint["status"] == "interrupted"
+    assert checkpoint["step"] == 2
+
+    resumed = EvolvaAgent(temp_config, assume_yes=True)
+    resumed.llm = type("FinalLLM", (), {"available": True, "chat": lambda self, messages, **kwargs: LLMResponse(content="resumed successfully")})()
+    result = resumed.resume(checkpoint["run_id"])
+
+    assert result.answer == "resumed successfully"
+    assert result.verification["passed"] is True
+    assert len(result.tool_logs) == 2
+    assert (temp_config.workspace / "resume-agent.txt").read_text(encoding="utf-8") == "checkpoint"
+
+
+def test_tui_resume_lists_interrupted_agent_runs(temp_config):
+    tui = EvolvaTUI(assume_yes=True, config=temp_config)
+    tui.agent.checkpoints.save(
+        "run_resume_tui",
+        {"run_id": "run_resume_tui", "user_message": "continue repository work", "step": 2},
+        status="interrupted",
+    )
+
+    tui._handle_command("/resume")
+
+    assert "run_resume_tui" in tui.messages[-1].text
+    assert "step=2" in tui.messages[-1].text
+
+
+def test_agent_routes_models_falls_back_and_emits_live_events(temp_config):
+    config = replace(
+        temp_config,
+        model="default-model",
+        model_coding="coding-model",
+        model_reasoning="reasoning-model",
+        model_fallbacks=("backup-model",),
+    )
+    agent = EvolvaAgent(config, assume_yes=True)
+    attempted: list[str] = []
+    events: list[dict[str, object]] = []
+
+    class RoutedLLM:
+        available = True
+
+        def chat(self, messages, *, model=None, **kwargs):
+            attempted.append(str(model))
+            if model in {"coding-model", "default-model"}:
+                raise RuntimeError(f"{model} unavailable")
+            return LLMResponse(content="fallback completed", usage={"total_tokens": 7}, model=str(model))
+
+    agent.llm = RoutedLLM()
+    result = agent.chat("implement a small code fix", event_callback=events.append)
+
+    assert result.answer == "fallback completed"
+    assert attempted == ["coding-model", "default-model", "backup-model"]
+    assert agent.last_llm_usage["total_tokens"] == 7
+    kinds = [str(event["kind"]) for event in events]
+    assert "model_route" in kinds
+    assert kinds.count("model_fallback") == 2
+    assert "verification" in kinds
+    assert "checkpoint_saved" in kinds
+    assert agent.tracer._listeners == []
+
+
+def test_agent_executes_native_tool_call_and_returns_tool_message(temp_config):
+    (temp_config.root / "brief.md").write_text("native evidence", encoding="utf-8")
+    agent = EvolvaAgent(temp_config, assume_yes=True)
+
+    class NativeLLM:
+        available = True
+
+        def __init__(self):
+            self.calls = 0
+            self.seen_tools = []
+
+        def chat(self, messages, **kwargs):
+            self.calls += 1
+            self.seen_tools.append(kwargs.get("tools", []))
+            if self.calls == 1:
+                return LLMResponse(
+                    content="",
+                    tool_calls=[LLMToolCall("call_1", "read_file", {"path": "brief.md"}, '{"path":"brief.md"}')],
+                )
+            assert messages[-1]["role"] == "tool"
+            assert messages[-1]["tool_call_id"] == "call_1"
+            assert "native evidence" in messages[-1]["content"]
+            return LLMResponse(content="Native flow completed")
+
+    llm = NativeLLM()
+    agent.llm = llm
+    agent.coordinator.llm = llm
+
+    result = agent.chat("读取 brief.md 并总结")
+
+    assert result.answer == "Native flow completed"
+    assert any(item["function"]["name"] == "read_file" for item in llm.seen_tools[0])
+    assert len(result.tool_logs) == 1
 
 def test_agent_auto_evolve_records_report_in_trace_and_context(temp_config):
     agent = EvolvaAgent(replace(temp_config, max_steps=1), assume_yes=True)
@@ -183,6 +359,58 @@ def test_collaborate_uses_task_router_when_roles_are_omitted(temp_config):
     assert report.route
     assert report.route["label"] == "research"
     assert report.roles == ["researcher", "reviewer"]
+
+
+def test_multi_agent_executes_dependency_dag_detects_conflicts_and_synthesizes(temp_config):
+    agent = EvolvaAgent(temp_config, assume_yes=True)
+    agent.coordinator.max_tool_steps = 0
+    seen_prompts: dict[str, str] = {}
+
+    class DAGLLM:
+        available = True
+
+        def chat(self, messages, **kwargs):
+            system = str(messages[0]["content"])
+            prompt = str(messages[-1]["content"])
+            if "Planner" in system:
+                seen_prompts["planner"] = prompt
+                return LLMResponse(content="Use SQLite for storage.")
+            if "Researcher" in system:
+                seen_prompts["researcher"] = prompt
+                return LLMResponse(content="Do not use SQLite for storage.")
+            if "Coder" in system:
+                seen_prompts["coder"] = prompt
+                return LLMResponse(content="Implement the option selected after review.")
+            if "Reviewer" in system:
+                seen_prompts["reviewer"] = prompt
+                return LLMResponse(content="The storage recommendation is contradictory and needs a benchmark.")
+            assert "lead reviewer" in system
+            seen_prompts["lead"] = prompt
+            return LLMResponse(content="Run the benchmark first; keep storage undecided until evidence resolves the conflict.")
+
+    agent.coordinator.llm = DAGLLM()
+    report = agent.coordinator.collaborate_report(
+        "Design and implement production storage",
+        roles=["planner", "researcher", "coder", "reviewer"],
+        parallel=True,
+        synthesize=True,
+    )
+
+    plan = {str(item["role"]): item["depends_on"] for item in report.plan}
+    assert plan == {
+        "planner": [],
+        "researcher": [],
+        "coder": ["planner", "researcher"],
+        "reviewer": ["planner", "researcher", "coder"],
+    }
+    assert "Use SQLite" in seen_prompts["coder"]
+    assert "Do not use SQLite" in seen_prompts["coder"]
+    assert "Implement the option" in seen_prompts["reviewer"]
+    assert report.status == "completed_with_conflicts"
+    assert report.conflicts
+    assert report.conflicts[0]["left_role"] == "planner"
+    assert "benchmark first" in report.synthesis
+    assert set(report.evidence_graph) == {"planner", "researcher", "coder", "reviewer"}
 
 
 def test_agent_chat_auto_routes_complex_tasks_into_context_and_trace(temp_config):
@@ -490,6 +718,37 @@ def test_eval_harness_score_summary_report_and_run_file(temp_config, tmp_path):
     tasks.write_text('\n# comment\n{"id":"fallback","input":"remember eval","expected_contains":["已记住"],"scorers":["no_tool_error"]}\n')
     run_results = harness.run_file(tasks)
     assert len(run_results) == 1 and run_results[0].passed
+
+
+def test_eval_harness_quality_probe_setup_and_metrics(temp_config):
+    harness = EvalHarness(temp_config, assume_yes=True)
+    route = harness.run_task(
+        {
+            "id": "route",
+            "probe": "tool_route",
+            "input": "修复代码并运行测试",
+            "expected_selected_tools": ["read_file", "run_tests"],
+            "forbidden_selected_tools": ["audio_transcribe"],
+            "max_tool_calls": 0,
+        }
+    )
+    retrieval = harness.run_task(
+        {
+            "id": "memory",
+            "probe": "memory_retrieval",
+            "input": "请用中文回答",
+            "setup_memory": [{"kind": "preference", "content": "用户偏好使用中文回复"}],
+            "expected_contains": ["使用中文"],
+        }
+    )
+    prompt = harness.run_task({"id": "prompt", "probe": "prompt", "input": "修复代码", "max_prompt_chars": 12000})
+    summary = harness.detailed_summary([route, retrieval, prompt])
+
+    assert route.passed and retrieval.passed and prompt.passed
+    assert route.metrics["selected_tools"]
+    assert summary["task_success_rate"] == 1.0
+    assert summary["first_pass_success_rate"] == 1.0
+    assert summary["tool_calls"] == 0
 
 
 def test_eval_harness_custom_scorer_registry(temp_config):

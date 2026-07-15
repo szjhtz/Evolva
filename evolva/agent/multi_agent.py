@@ -9,6 +9,7 @@ from typing import Any, Protocol
 
 from evolva.agent.llm import OpenAICompatibleLLM, extract_json_object
 from evolva.agent.memory import MemoryStore
+from evolva.agent.relevance import text_tokens
 from evolva.agent.skills import SkillStore
 from evolva.agent.todo import TodoStore
 from evolva.tools.base import ToolRegistry, ToolResult
@@ -68,6 +69,8 @@ class MultiAgentRun:
     route: dict[str, object] | None = None
     plan: list[dict[str, object]] = field(default_factory=list)
     synthesis: str = ""
+    conflicts: list[dict[str, object]] = field(default_factory=list)
+    evidence_graph: dict[str, dict[str, object]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -85,6 +88,9 @@ class MultiAgentRun:
             lines.extend(f"- {item}" for item in self.errors)
         if self.synthesis:
             lines.append(f"\n## Synthesis\n{self.synthesis}")
+        if self.conflicts:
+            lines.append("\n## Conflicts")
+            lines.extend(f"- {item['left_role']} vs {item['right_role']}: {item['topic']}" for item in self.conflicts)
         return "\n".join(lines)
 
 
@@ -289,35 +295,26 @@ class MultiAgentCoordinator:
         chosen = self._normalize_roles(chosen)
         run_id = "multi_" + time.strftime("%Y%m%d_%H%M%S", time.gmtime()) + "_" + uuid.uuid4().hex[:8]
         started_at = time.time()
-        results: list[AgentRoleResult] = []
-        errors: list[str] = []
         plan = self._plan_assignments(task, chosen)
-        if parallel and len(chosen) > 1:
-            ordered: dict[str, AgentRoleResult] = {}
-            with ThreadPoolExecutor(max_workers=min(len(chosen), self.max_roles_per_run), thread_name_prefix="evolva-role") as pool:
-                futures = {
-                    pool.submit(self.delegate_report, role, str(assignment["task"]), context=context): role
-                    for role, assignment in ((role, next(item for item in plan if item["role"] == role)) for role in chosen)
-                }
-                for future in as_completed(futures):
-                    role = futures[future]
-                    try:
-                        ordered[role] = future.result()
-                    except Exception as exc:
-                        ordered[role] = AgentRoleResult(role, False, "", "failed", 0, error=str(exc))
-            results = [ordered[role] for role in chosen]
-        else:
-            running_context = context
-            for role in chosen:
-                assignment = next(item for item in plan if item["role"] == role)
-                result = self.delegate_report(role, str(assignment["task"]), context=running_context)
-                results.append(result)
-                running_context += f"\n\n[{role}]\n{result.output}"
+        results = self._execute_assignments(plan, context=context, parallel=parallel)
+        errors: list[str] = []
         for result in results:
             if not result.ok:
                 errors.append(f"{result.role}: {result.error or result.status}")
+        conflicts = self._detect_conflicts(results)
         status = "completed" if not errors else "completed_with_fallbacks"
-        synthesis = self._synthesize(task, results) if synthesize else ""
+        if conflicts:
+            status = "completed_with_conflicts"
+        synthesis = self._synthesize(task, results, conflicts) if synthesize or conflicts else ""
+        evidence_graph = {
+            result.role: {
+                "status": result.status,
+                "ok": result.ok,
+                "tool_calls": result.tool_calls,
+                "output_excerpt": result.output[:1500],
+            }
+            for result in results
+        }
         return MultiAgentRun(
             run_id=run_id,
             task=task,
@@ -331,6 +328,8 @@ class MultiAgentCoordinator:
             route=route,
             plan=plan,
             synthesis=synthesis,
+            conflicts=conflicts,
+            evidence_graph=evidence_graph,
         )
 
     def _plan_assignments(self, task: str, roles: list[str]) -> list[dict[str, object]]:
@@ -340,25 +339,160 @@ class MultiAgentCoordinator:
             "coder": "Produce concrete implementation decisions and verification actions.",
             "reviewer": "Challenge correctness, safety, regressions, and missing tests.",
         }
-        return [
-            {"role": role, "task": f"{task}\n\nRole assignment: {focus.get(role, self.roles[role].description)}", "depends_on": []}
-            for role in roles
-        ]
+        selected = set(roles)
+        plan: list[dict[str, object]] = []
+        for role in roles:
+            if role in {"planner", "researcher"}:
+                dependencies: list[str] = []
+            elif role == "coder":
+                dependencies = [name for name in ("planner", "researcher") if name in selected]
+            elif role == "reviewer":
+                dependencies = [name for name in roles if name != "reviewer"]
+            else:
+                dependencies = []
+            plan.append(
+                {
+                    "id": role,
+                    "role": role,
+                    "task": f"{task}\n\nRole assignment: {focus.get(role, self.roles[role].description)}",
+                    "depends_on": dependencies,
+                }
+            )
+        return plan
 
-    def _synthesize(self, task: str, results: list[AgentRoleResult]) -> str:
+    def _execute_assignments(self, plan: list[dict[str, object]], *, context: str, parallel: bool) -> list[AgentRoleResult]:
+        completed: dict[str, AgentRoleResult] = {}
+        pending = {str(item["role"]): item for item in plan}
+        order = [str(item["role"]) for item in plan]
+        while pending:
+            ready = [
+                pending[role]
+                for role in order
+                if role in pending and all(dep in completed for dep in self._assignment_dependencies(pending[role]))
+            ]
+            if not ready:
+                raise RuntimeError("multi-agent assignment graph contains a cycle or missing dependency")
+            batch = ready if parallel else ready[:1]
+
+            def execute(assignment: dict[str, object]) -> AgentRoleResult:
+                role = str(assignment["role"])
+                dependencies = self._assignment_dependencies(assignment)
+                failed_dependencies = [dep for dep in dependencies if not completed[dep].ok]
+                dependency_context = self._dependency_context(dependencies, completed)
+                if failed_dependencies and role != "reviewer":
+                    return AgentRoleResult(
+                        role,
+                        False,
+                        dependency_context,
+                        "dependency_failed",
+                        0,
+                        error="failed dependencies: " + ", ".join(failed_dependencies),
+                    )
+                extra = context + dependency_context
+                return self.delegate_report(role, str(assignment["task"]), context=extra)
+
+            if parallel and len(batch) > 1:
+                with ThreadPoolExecutor(max_workers=min(len(batch), self.max_roles_per_run), thread_name_prefix="evolva-role") as pool:
+                    futures = {pool.submit(execute, assignment): str(assignment["role"]) for assignment in batch}
+                    batch_results: dict[str, AgentRoleResult] = {}
+                    for future in as_completed(futures):
+                        role = futures[future]
+                        try:
+                            batch_results[role] = future.result()
+                        except Exception as exc:
+                            batch_results[role] = AgentRoleResult(role, False, "", "failed", 0, error=str(exc))
+                for assignment in batch:
+                    role = str(assignment["role"])
+                    completed[role] = batch_results[role]
+                    pending.pop(role, None)
+            else:
+                assignment = batch[0]
+                role = str(assignment["role"])
+                try:
+                    completed[role] = execute(assignment)
+                except Exception as exc:
+                    completed[role] = AgentRoleResult(role, False, "", "failed", 0, error=str(exc))
+                pending.pop(role, None)
+        return [completed[role] for role in order]
+
+    @staticmethod
+    def _dependency_context(dependencies: list[str], completed: dict[str, AgentRoleResult]) -> str:
+        if not dependencies:
+            return ""
+        sections = [f"\n\nDependency evidence [{role}/{completed[role].status}]:\n{completed[role].output[:3000]}" for role in dependencies]
+        return "".join(sections)
+
+    @staticmethod
+    def _assignment_dependencies(assignment: dict[str, object]) -> list[str]:
+        raw = assignment.get("depends_on", [])
+        if not isinstance(raw, (list, tuple, set)):
+            return []
+        return [str(item) for item in raw]
+
+    def _synthesize(self, task: str, results: list[AgentRoleResult], conflicts: list[dict[str, object]]) -> str:
         evidence = "\n\n".join(f"[{result.role}/{result.status}]\n{result.output}" for result in results)
+        conflict_text = json.dumps(conflicts, ensure_ascii=False, indent=2) if conflicts else "None detected."
         if not self.llm.available:
-            return evidence
+            return f"Role evidence:\n{evidence}\n\nConflicts:\n{conflict_text}"
         try:
             return self.llm.chat(
                 [
-                    {"role": "system", "content": "You are Evolva's lead agent. Reconcile role reports into one decision, resolving conflicts and preserving evidence, risks, and next actions."},
-                    {"role": "user", "content": f"Task:\n{task}\n\nRole reports:\n{evidence}"},
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are Evolva's lead reviewer. Produce one evidence-backed decision. "
+                            "Resolve or explicitly retain every detected conflict, reject unsupported claims, "
+                            "and state acceptance criteria, risks, and next actions."
+                        ),
+                    },
+                    {"role": "user", "content": f"Task:\n{task}\n\nRole reports:\n{evidence}\n\nDetected conflicts:\n{conflict_text}"},
                 ],
                 temperature=0.1,
             ).content.strip()
         except Exception as exc:
             return f"Synthesis unavailable: {exc}\n\n{evidence}"
+
+    def _detect_conflicts(self, results: list[AgentRoleResult]) -> list[dict[str, object]]:
+        claims: list[tuple[str, str, set[str], bool]] = []
+        stop = {"a", "an", "and", "do", "for", "is", "it", "of", "the", "to", "use", "with", "should", "建议", "使用", "采用"}
+        negations = {"not", "never", "no", "without", "avoid", "不要", "不能", "禁止", "避免"}
+        for result in results:
+            if not result.output:
+                continue
+            lines = [line.strip(" -*\t") for line in result.output.splitlines() if line.strip()]
+            for line in lines[:30]:
+                tokens = text_tokens(line)
+                polarity = bool(tokens & negations)
+                topic = tokens - stop - negations
+                if topic:
+                    claims.append((result.role, line[:500], topic, polarity))
+        conflicts: list[dict[str, object]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for index, left in enumerate(claims):
+            for right in claims[index + 1 :]:
+                if left[0] == right[0] or left[3] == right[3]:
+                    continue
+                overlap = left[2] & right[2]
+                if not overlap:
+                    continue
+                ratio = len(overlap) / max(1, min(len(left[2]), len(right[2])))
+                if ratio < 0.5:
+                    continue
+                topic_text = ", ".join(sorted(overlap)[:8])
+                key = (left[0], right[0], topic_text)
+                if key in seen:
+                    continue
+                seen.add(key)
+                conflicts.append(
+                    {
+                        "left_role": left[0],
+                        "right_role": right[0],
+                        "topic": topic_text,
+                        "left_claim": left[1],
+                        "right_claim": right[1],
+                    }
+                )
+        return conflicts[:20]
 
     def route_task(self, task: str, *, max_roles: int | None = None) -> TaskRoute:
         return self.router.route(task, max_roles=max_roles or self.max_roles_per_run)

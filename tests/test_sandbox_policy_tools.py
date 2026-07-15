@@ -314,6 +314,11 @@ def test_builtin_file_memory_context_todo_and_policy_tools(tmp_path):
     assert "file\tworkspace/a.txt" in reg.call("list_files", {"path": "workspace"}).output
     assert not reg.call("read_file", {"path": "missing.txt"}).ok
 
+    native = reg.openai_tools(["read_file"])
+    assert native[0]["function"]["name"] == "read_file"
+    assert native[0]["function"]["parameters"]["properties"]["path"]["type"] == "string"
+    assert "path" in native[0]["function"]["parameters"]["required"]
+
     assert reg.call("remember", {"kind": "fact", "content": "pytest matters"}).ok
     low = reg.call("remember", {"kind": "fact", "content": "low confidence note", "confidence": 0.1})
     assert low.ok and "low confidence note" not in reg.call("recall", {"query": "confidence"}).output

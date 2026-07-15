@@ -57,7 +57,7 @@ TUI keys:
   /exit          Quit
 
 Commands:
-  /help, /config [set|wizard|clear], /session [list|new|use|rename|fork|retry], /tools, /skills, /memory [query|stats|recent n], /context [query], /todo, /agents, /trace [list|show|context], /model [name], /policy, /mcp [add|remove|tools|health], /image <path|url> [text], /evolve [feedback|status|audit|trace|apply-trace|eval|apply-eval], /dream [status|backlog|verify|verify --promote|apply|--min-confidence n], /loop [list|show|run], /run <tool> <json>
+  /help, /config [set|wizard|clear], /session [list|new|use|rename|fork|retry], /resume [run_id|latest], /tools, /skills, /memory [query|stats|recent n], /context [query], /todo, /agents, /trace [list|show|context], /model [name], /policy, /mcp [add|remove|tools|health], /image <path|url> [text], /evolve [feedback|status|audit|trace|apply-trace|eval|apply-eval], /dream [status|backlog|verify|verify --promote|apply|--min-confidence n], /loop [list|show|run], /run <tool> <json>
 """.strip()
 
 
@@ -311,7 +311,7 @@ class EvolvaTUI:
         return isinstance(ch, int) and ch in keys
 
     def _complete_command(self) -> None:
-        commands = ["/help", "/config", "/session", "/cancel", "/tools", "/skills", "/memory", "/context", "/todo", "/agents", "/trace", "/model", "/policy", "/repo", "/mcp", "/image", "/evolve", "/dream", "/loop", "/run", "/exit"]
+        commands = ["/help", "/config", "/session", "/resume", "/cancel", "/tools", "/skills", "/memory", "/context", "/todo", "/agents", "/trace", "/model", "/policy", "/repo", "/mcp", "/image", "/evolve", "/dream", "/loop", "/run", "/exit"]
         matches = [c for c in commands if c.startswith(self.input_text)]
         if len(matches) == 1:
             self.input_text = matches[0] + (" " if matches[0] not in {"/help", "/tools", "/skills", "/exit"} else "")
@@ -344,17 +344,52 @@ class EvolvaTUI:
 
     def _worker_chat(self, line: str, cancellation_token: CancellationToken | None = None) -> None:
         try:
-            result = self.agent.chat(line, cancellation_token=cancellation_token)
+            result = self.agent.chat(line, cancellation_token=cancellation_token, event_callback=self._queue_agent_event)
             self.queue.put(("agent_result", result))
         except Exception as exc:
             self.queue.put(("error", f"Agent error: {exc}"))
 
     def _worker_chat_image(self, question: str, image: str) -> None:
         try:
-            result = self.agent.chat(question, image_sources=[image])
+            result = self.agent.chat(question, image_sources=[image], event_callback=self._queue_agent_event)
             self.queue.put(("agent_result", result))
         except Exception as exc:
             self.queue.put(("error", f"Image chat error: {exc}"))
+
+    def _worker_resume(self, run_id: str) -> None:
+        try:
+            result = self.agent.resume(run_id, event_callback=self._queue_agent_event)
+            self.queue.put(("agent_result", result))
+        except Exception as exc:
+            self.queue.put(("error", f"Resume error: {exc}"))
+
+    def _queue_agent_event(self, event: dict[str, Any]) -> None:
+        rendered = self._format_agent_event(event)
+        if rendered:
+            self.queue.put(("agent_event", rendered))
+
+    @staticmethod
+    def _format_agent_event(event: dict[str, Any]) -> str:
+        kind = str(event.get("kind", ""))
+        raw_data = event.get("data")
+        data: dict[str, Any] = raw_data if isinstance(raw_data, dict) else {}
+        if kind == "langgraph_node" and data.get("node") == "analyze":
+            return "PLAN  " + " -> ".join(str(item) for item in data.get("plan", []))
+        if kind == "langgraph_node" and data.get("node") == "tool":
+            return f"ACT   {data.get('tool', 'tool')}"
+        if kind == "model_route":
+            return f"MODEL {data.get('tier', 'default')} -> {data.get('selected', '')}"
+        if kind == "model_fallback":
+            return f"MODEL fallback {data.get('failed_model', '')} -> {data.get('next_model', '')}"
+        if kind == "verification":
+            state = "passed" if data.get("passed") else "needs recovery"
+            reasons = "; ".join(str(item) for item in data.get("reasons", []))
+            return f"VERIFY {state}" + (f" · {reasons}" if reasons else "")
+        if kind == "recovery":
+            return f"RECOVER attempt {data.get('attempt', 0)} · " + "; ".join(str(item) for item in data.get("reasons", []))
+        if kind == "checkpoint_resumed":
+            return f"RESUME {data.get('run_id', '')} from step {data.get('step', 0)}"
+        return ""
 
     def _handle_command(self, line: str) -> None:
         try:
@@ -366,6 +401,26 @@ class EvolvaTUI:
                 self.cancel_active()
             elif line.startswith("/session"):
                 self._handle_session_command(line.removeprefix("/session").strip())
+            elif line.startswith("/resume"):
+                requested = line.removeprefix("/resume").strip()
+                checkpoints = self.agent.checkpoints.list(limit=20)
+                if not requested:
+                    if not checkpoints:
+                        self._add_system("No interrupted agent runs.")
+                    else:
+                        rows = ["Interrupted agent runs:"]
+                        rows.extend(
+                            f"- {item['run_id']} [{item['status']}] step={item['step']} {item['user_message']}"
+                            for item in checkpoints
+                        )
+                        self._add_system("\n".join(rows))
+                elif requested == "latest" and not checkpoints:
+                    self._add_system("No interrupted agent runs.")
+                else:
+                    run_id = str(checkpoints[0]["run_id"]) if requested == "latest" and checkpoints else requested
+                    self.busy = True
+                    self.status = f"Resuming {run_id}..."
+                    threading.Thread(target=self._worker_resume, args=(run_id,), daemon=True).start()
             elif line == "/tools":
                 self._add_system(self.agent.tools.describe())
             elif line == "/skills":
@@ -896,6 +951,10 @@ class EvolvaTUI:
                 self.busy = False
                 self.current_cancellation = None
                 self.status = "Ready"
+            elif kind == "agent_event":
+                rendered = str(payload)
+                self.tool_logs.append(rendered)
+                self.status = rendered[:160]
             elif kind == "tool_result":
                 name, ok, output = payload
                 prefix = f"TOOL {name} -> ok={ok}"
@@ -1335,6 +1394,7 @@ if TEXTUAL_AVAILABLE:
             self._spinner_tick = 0
             self._thinking_started_at: float | None = None
             self._last_tool_log: str | None = None
+            self._rendered_tool_logs = 0
 
         def compose(self) -> ComposeResult:
             with Container(id="shell"):
@@ -1495,11 +1555,10 @@ if TEXTUAL_AVAILABLE:
         def _drain_runtime_queue(self) -> None:
             self.runtime._drain_queue()
             if self.runtime.tool_logs:
-                tool_log = self.runtime.tool_logs[-1]
                 tools = self.query_one("#tools", EvolvaLog)
-                if not getattr(self, "_last_tool_log", None) == tool_log:
+                for tool_log in self.runtime.tool_logs[self._rendered_tool_logs :]:
                     tools.write(tool_log)
-                    self._last_tool_log = tool_log
+                self._rendered_tool_logs = len(self.runtime.tool_logs)
             self._flush_runtime_messages()
             self._refresh_status()
 
@@ -1633,7 +1692,7 @@ class EvolvaInlineTUI:
             self.app.busy = True
             self.app.status = "thinking"
             try:
-                result = self.app.agent.chat(line)
+                result = self.app.agent.chat(line, event_callback=self._print_agent_event)
             except Exception as exc:
                 print(self._error(f"Agent error: {exc}"))
                 self.app.busy = False
@@ -1643,6 +1702,11 @@ class EvolvaInlineTUI:
                 for log in result.tool_logs:
                     print(self._tool(log))
             print(self._agent(result.answer))
+
+    def _print_agent_event(self, event: dict[str, Any]) -> None:
+        rendered = self.app._format_agent_event(event)
+        if rendered:
+            print(self._tool(rendered))
 
     def _print_header(self) -> None:
         version = self.app._project_version()

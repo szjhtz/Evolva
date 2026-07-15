@@ -38,6 +38,57 @@ def test_repo_index_builds_symbol_chunks_and_searches(tmp_path: Path) -> None:
     assert results[0].score > 0
 
 
+def test_repo_index_supports_chinese_queries_for_english_symbols(tmp_path: Path) -> None:
+    (tmp_path / "evolution.py").write_text(
+        "class SelfEvolutionEngine:\n"
+        "    def promote_memory(self):\n"
+        "        return 'verified'\n",
+        encoding="utf-8",
+    )
+    index = RepoIndex(tmp_path, tmp_path / ".evolva" / "index.json")
+
+    results = index.search("查找自我进化和记忆晋级逻辑")
+
+    assert results
+    assert results[0].path == "evolution.py"
+    assert any(row.symbol == "SelfEvolutionEngine" for row in results)
+
+
+def test_repo_index_respects_gitignore_without_hiding_business_directories(tmp_path: Path) -> None:
+    (tmp_path / ".gitignore").write_text("vendor/\n*.generated.ts\n", encoding="utf-8")
+    (tmp_path / "vendor").mkdir()
+    (tmp_path / "vendor" / "hidden.py").write_text("class HiddenVendorCode:\n    pass\n", encoding="utf-8")
+    (tmp_path / "workflows").mkdir()
+    (tmp_path / "workflows" / "engine.py").write_text("class BusinessWorkflow:\n    pass\n", encoding="utf-8")
+    (tmp_path / "ignored.generated.ts").write_text("export class GeneratedThing {}\n", encoding="utf-8")
+    index = RepoIndex(tmp_path, tmp_path / ".evolva" / "index.json")
+
+    snapshot = index.build()
+    paths = {chunk.path for chunk in snapshot.chunks}
+
+    assert "workflows/engine.py" in paths
+    assert "vendor/hidden.py" not in paths
+    assert "ignored.generated.ts" not in paths
+
+
+def test_repo_index_chunks_common_language_symbols(tmp_path: Path) -> None:
+    (tmp_path / "router.ts").write_text(
+        "export interface RouteDecision { label: string }\n"
+        "export function selectRoute(task: string) { return task }\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "worker.go").write_text("package worker\n\ntype Worker struct {}\n\nfunc RunTask() {}\n", encoding="utf-8")
+    index = RepoIndex(tmp_path, tmp_path / ".evolva" / "index.json")
+
+    snapshot = index.build()
+    symbols = {(chunk.path, chunk.symbol) for chunk in snapshot.chunks}
+
+    assert ("router.ts", "RouteDecision") in symbols
+    assert ("router.ts", "selectRoute") in symbols
+    assert ("worker.go", "Worker") in symbols
+    assert ("worker.go", "RunTask") in symbols
+
+
 def test_repo_index_persists_and_loads(tmp_path: Path) -> None:
     (tmp_path / "README.md").write_text("# Evolva\n\nTrace Eval Self Evolution\n", encoding="utf-8")
     index = RepoIndex(tmp_path, tmp_path / "repo_index" / "index.json")

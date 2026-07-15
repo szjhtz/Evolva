@@ -4,8 +4,9 @@ import json
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+from evolva.agent.context import ContextKind
 from evolva.agent.core import EvolvaAgent
 from evolva.config import AgentConfig
 from evolva.eval.scorers import ScoreReport, ScorerContext, ScorerRegistry, build_default_registry
@@ -24,6 +25,7 @@ class EvalResult:
     model: str = ""
     usage: dict[str, Any] = field(default_factory=dict)
     estimated_cost_usd: float = 0.0
+    metrics: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -71,7 +73,9 @@ class EvalHarness:
     def run_task(self, task: dict[str, Any]) -> EvalResult:
         started = time.time()
         self.agent.last_llm_usage = {}
+        self._prepare_task(task)
         trace_run_id = ""
+        metrics: dict[str, Any] = {"selected_tools": [], "prompt_chars": 0, "tool_call_count": 0}
         if "tool" in task:
             tool_name = str(task["tool"])
             trace_run_id = self.agent.tracer.start(
@@ -82,20 +86,39 @@ class EvalHarness:
             self.agent.tracer.end(tool_result.output, status="completed" if tool_result.ok else "tool_failed")
             answer = tool_result.output
             tool_logs = [f"TOOL {tool_name} ok={tool_result.ok}\n{tool_result.output}"]
+            metrics["tool_call_count"] = 1
+        elif "probe" in task:
+            answer, tool_logs, metrics = self._run_probe(task)
         else:
-            result = self.agent.chat(str(task["input"]))
+            raw_turns = task.get("turns")
+            turns: list[Any] = list(raw_turns) if isinstance(raw_turns, list) else [task["input"]]
+            result = None
+            all_tool_logs: list[str] = []
+            for turn in turns:
+                result = self.agent.chat(str(turn))
+                all_tool_logs.extend(result.tool_logs)
+            assert result is not None
             rows = self.agent.tracer.list_runs(limit=1)
             trace_run_id = str(rows[0]["run_id"]) if rows else ""
             answer = result.answer
-            tool_logs = result.tool_logs
+            tool_logs = all_tool_logs
+            metrics.update(
+                {
+                    "tool_call_count": len(all_tool_logs),
+                    "failed_tool_count": len(result.failed_tools),
+                    "stopped_by_limit": result.stopped_by_limit,
+                }
+            )
         duration_ms = int((time.time() - started) * 1000)
         usage = dict(self.agent.last_llm_usage)
         estimated_cost = self._estimated_cost(usage)
-        score_report = self.score_report(task, answer, tool_logs, duration_ms=duration_ms, trace_run_id=trace_run_id)
+        score_report = self.score_report(task, answer, tool_logs, duration_ms=duration_ms, trace_run_id=trace_run_id, metrics=metrics)
         checks = score_report.booleans()
         passed = score_report.passed if checks else bool(answer.strip())
         score = score_report.score
-        return EvalResult(
+        metrics["task_success"] = passed
+        metrics["first_pass_success"] = passed and not metrics.get("failed_tool_count") and not metrics.get("stopped_by_limit")
+        eval_result = EvalResult(
             id=str(task.get("id", "unnamed")),
             passed=passed,
             score=score,
@@ -107,16 +130,146 @@ class EvalHarness:
             model=self.config.model if self.agent.llm.available else "rule-mode",
             usage=usage,
             estimated_cost_usd=estimated_cost,
+            metrics=metrics,
         )
+        self._cleanup_task(task)
+        return eval_result
 
     def score(self, task: dict[str, Any], answer: str, tool_logs: list[str], *, duration_ms: int | None = None) -> dict[str, bool]:
         """Return legacy boolean checks for compatibility with existing callers."""
         return self.score_report(task, answer, tool_logs, duration_ms=duration_ms).booleans()
 
-    def score_report(self, task: dict[str, Any], answer: str, tool_logs: list[str], *, duration_ms: int | None = None, trace_run_id: str = "") -> ScoreReport:
+    def score_report(
+        self,
+        task: dict[str, Any],
+        answer: str,
+        tool_logs: list[str],
+        *,
+        duration_ms: int | None = None,
+        trace_run_id: str = "",
+        metrics: dict[str, Any] | None = None,
+    ) -> ScoreReport:
         """Run registered scorers and return a weighted, explainable score report."""
-        context = ScorerContext(root=self.config.root, answer=answer, tool_logs=tool_logs, duration_ms=duration_ms, agent=self.agent, trace_run_id=trace_run_id)
+        context = ScorerContext(
+            root=self.config.root,
+            answer=answer,
+            tool_logs=tool_logs,
+            duration_ms=duration_ms,
+            agent=self.agent,
+            trace_run_id=trace_run_id,
+            metrics=metrics or {},
+        )
         return self.scorers.run(task, context)
+
+    def _prepare_task(self, task: dict[str, Any]) -> None:
+        for row in task.get("setup_files", []):
+            if not isinstance(row, dict) or not row.get("path"):
+                continue
+            path = self._safe_artifact_path(str(row["path"]))
+            if path is None:
+                raise ValueError(f"eval setup path escapes root: {row['path']}")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(str(row.get("content", "")), encoding="utf-8")
+        for row in task.get("setup_memory", []):
+            if isinstance(row, dict):
+                self.agent.memory.add(
+                    str(row.get("kind", "fact")),
+                    str(row.get("content", "")),
+                    confidence=float(row.get("confidence", 0.9)),
+                    verified=bool(row.get("verified", True)),
+                    source="eval_setup",
+                )
+        for row in task.get("setup_context", []):
+            if isinstance(row, dict):
+                kind = str(row.get("kind", "note"))
+                if kind not in {"message", "note", "artifact", "summary", "decision"}:
+                    raise ValueError(f"unsupported eval context kind: {kind}")
+                self.agent.context.add(cast(ContextKind, kind), str(row.get("content", "")), role="eval")
+
+    def _cleanup_task(self, task: dict[str, Any]) -> None:
+        if task.get("cleanup_setup", True) is False:
+            return
+        root = self.config.root.resolve()
+        for row in task.get("setup_files", []):
+            if not isinstance(row, dict) or not row.get("path"):
+                continue
+            path = self._safe_artifact_path(str(row["path"]))
+            if path is None or not path.exists() or not path.is_file():
+                continue
+            path.unlink()
+            parent = path.parent
+            while parent != root:
+                try:
+                    parent.rmdir()
+                except OSError:
+                    break
+                parent = parent.parent
+
+    def _run_probe(self, task: dict[str, Any]) -> tuple[str, list[str], dict[str, Any]]:
+        probe = str(task.get("probe", "")).strip()
+        query = str(task.get("input", ""))
+        metrics: dict[str, Any] = {"selected_tools": [], "prompt_chars": 0, "tool_call_count": 0}
+        if probe == "tool_route":
+            selection = self.agent.tool_router.select_report(query)
+            metrics["selected_tools"] = selection.names
+            return json.dumps(selection.names, ensure_ascii=False), [f"TOOL_ROUTE {selection.reason}: {', '.join(selection.names)}"], metrics
+        if probe == "memory_retrieval":
+            return self.agent.memory.context(query), [], metrics
+        if probe == "context_retrieval":
+            return self.agent.context.prompt_context(query), [], metrics
+        if probe == "skill_retrieval":
+            return self.agent.skills.context(query), [], metrics
+        if probe == "prompt":
+            messages = self.agent._messages(query, str(task.get("scratch", "")))
+            answer = str(messages[0]["content"])
+            metrics.update({"selected_tools": list(self.agent.last_selected_tools), "prompt_chars": len(answer)})
+            return answer, [f"PROMPT chars={len(answer)} tools={len(self.agent.last_selected_tools)}"], metrics
+        if probe == "task_route":
+            task_route = self.agent.coordinator.route_task(query)
+            return json.dumps(task_route.to_dict(), ensure_ascii=False), [], metrics
+        if probe == "model_route":
+            model_route = self.agent.model_router.route(query, recovery_attempts=int(task.get("recovery_attempts", 0)))
+            return json.dumps(model_route.to_dict(), ensure_ascii=False), [], metrics
+        if probe == "multi_agent_plan":
+            roles = [str(role) for role in task.get("roles", [])] or self.agent.coordinator.route_task(query).roles
+            plan = self.agent.coordinator._plan_assignments(query, roles)
+            return json.dumps(plan, ensure_ascii=False), [], metrics
+        if probe == "verification_gate":
+            state = {
+                "proposed_final": str(task.get("proposed_final", "done")),
+                "tool_records": list(task.get("tool_records", [])),
+                "recovery_attempts": int(task.get("recovery_attempts", 0)),
+            }
+            verification_report = self.agent.graph_runtime._verification_report(state)
+            return json.dumps(verification_report, ensure_ascii=False), [], metrics
+        if probe == "evolution_candidate":
+            evolution_report = self.agent.evolution.evolve(
+                query,
+                trigger=str(task.get("trigger", "tool_failure")),
+                category=str(task.get("category", "tool_failure")),
+                evidence=[str(item) for item in task.get("evidence", [])],
+            )
+            promotion = None
+            if "promotion_evidence" in task:
+                promotion = self.agent.evolution.promote_fingerprint(
+                    evolution_report.fingerprint,
+                    evidence=[str(item) for item in task.get("promotion_evidence", [])],
+                    regression_passed=bool(task.get("regression_passed", False)),
+                )
+            skill = next((item for item in self.agent.skills.list() if item.name == evolution_report.skill_name), None)
+            payload = {
+                "report": evolution_report.to_dict(),
+                "promotion": promotion,
+                "memory_in_context": evolution_report.lesson in self.agent.memory.context(query),
+                "skill_status": (skill.metadata or {}).get("status") if skill else "missing",
+            }
+            return json.dumps(payload, ensure_ascii=False), [], metrics
+        if probe == "checkpoint_roundtrip":
+            run_id = f"eval_{task.get('id', 'checkpoint')}"
+            self.agent.checkpoints.save(run_id, {"run_id": run_id, "user_message": query, "step": 3}, status="interrupted")
+            loaded = self.agent.checkpoints.load(run_id)
+            return json.dumps(loaded, ensure_ascii=False), [], metrics
+        raise ValueError(f"unknown eval probe: {probe}")
 
     def _safe_artifact_path(self, artifact: str) -> Path | None:
         path = (self.config.root / artifact).resolve()
@@ -276,6 +429,9 @@ class EvalHarness:
             "input_tokens": sum(int(result.usage.get("input_tokens", result.usage.get("prompt_tokens", 0)) or 0) for result in results),
             "output_tokens": sum(int(result.usage.get("output_tokens", result.usage.get("completion_tokens", 0)) or 0) for result in results),
             "models": sorted({result.model for result in results if result.model}),
+            "task_success_rate": sum(1 for result in results if result.metrics.get("task_success")) / max(1, len(results)),
+            "first_pass_success_rate": sum(1 for result in results if result.metrics.get("first_pass_success")) / max(1, len(results)),
+            "tool_calls": sum(int(result.metrics.get("tool_call_count", 0)) for result in results),
         })
         return summary
 
